@@ -1,0 +1,36 @@
+
+# Dependencies
+**/node_modules/
+
+# Environment variables
+**/.env
+**/.env.*
+!.env.example
+!**/.env.example
+
+# Next.js
+**/.next/
+**/out/
+
+# Backend build
+backend/dist/
+backend/build/
+
+# Logs
+**/*.log
+**/logs/
+
+# Cache
+**/.cache/
+**/coverage/
+**/*.tsbuildinfo
+
+# Uploads and temporary files
+backend/storage/
+backend/uploads/
+**/tmp/
+**/temp/
+
+# OS
+.DS_Store
+Thumbs.db
