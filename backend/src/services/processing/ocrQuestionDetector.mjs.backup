@@ -1,0 +1,4063 @@
+import fs from "fs/promises";
+import path from "path";
+import sharp from "sharp";
+import { createWorker } from "tesseract.js";
+
+// ============================================================================
+// OCR QUESTION NUMBER DETECTOR
+// ============================================================================
+//
+// Page structure:
+//
+//      Blank / margin | Examiner | Question No | Answer
+//                                |            |
+//                                |<-- ~40px -->|
+//
+// Important:
+// - Blank left space is NOT used to decide the column.
+// - Column boundaries can be BLACK, RED, BLUE or LIGHT GRAY.
+// - Two real boundaries are preferred.
+// - If only one boundary is visible, both left/right possibilities are tested.
+// - OCR/candidates run only inside the detected Question Number column.
+// - Original image/PDF is never modified.
+//
+// Usage:
+//
+// node ocrQuestionDetector.mjs <imagePath> <outputDir>
+//
+// Example:
+//
+// node src/services/processing/ocrQuestionDetector.mjs ^
+// storage/processing/2d97d134-bf10-418c-85bc-13322af89f5e/page-0007.png ^
+// storage/processing/column-test-page7
+// ============================================================================
+
+
+// ============================================================================
+// CONFIG
+// ============================================================================
+
+const MIN_QUESTION_NO = 1;
+const MAX_QUESTION_NO = 30;
+
+
+// -----------------------------------------------------------------------------
+// X search area.
+//
+// This is only a broad search area to avoid extreme page edge and answer body.
+// It is NOT based on the blank left-space width.
+//
+// On Page 7:
+//
+// 1047 * 0.10 = ~105
+// 1047 * 0.45 = ~471
+//
+// Actual Question No column is around x 306 - 350.
+// -----------------------------------------------------------------------------
+
+const COLUMN_SEARCH_START_PERCENT = 0.10;
+const COLUMN_SEARCH_END_PERCENT = 0.45;
+
+
+// Search vertically through almost complete page.
+const COLUMN_SEARCH_TOP_PERCENT = 0.09;
+const COLUMN_SEARCH_BOTTOM_PERCENT = 0.94;
+
+
+// Actual Question Number column.
+const MIN_COLUMN_WIDTH = 28;
+const MAX_COLUMN_WIDTH = 72;
+
+
+// Used only if one boundary is visible.
+const EXPECTED_COLUMN_WIDTHS = [
+    32,
+    38,
+    44,
+    50,
+    58,
+    64,
+];
+
+
+// Additional width after actual column detection.
+//
+// Actual:
+//     | Question No |
+//
+// OCR ROI:
+//     | 18px | Question No | 18px |
+//
+const COLUMN_PADDING_LEFT = 18;
+const COLUMN_PADDING_RIGHT = 18;
+
+
+// -----------------------------------------------------------------------------
+// Vertical line detection
+// -----------------------------------------------------------------------------
+
+const LINE_MIN_COVERAGE = 0.18;
+const LINE_MIN_LONGEST_RUN = 0.08;
+
+const LINE_CLUSTER_GAP = 6;
+
+
+// -----------------------------------------------------------------------------
+// Candidate detection
+// -----------------------------------------------------------------------------
+
+const MIN_COMPONENT_AREA = 8;
+const MAX_COMPONENT_AREA = 1500;
+
+const MIN_COMPONENT_WIDTH = 2;
+const MAX_COMPONENT_WIDTH = 80;
+
+const MIN_COMPONENT_HEIGHT = 6;
+const MAX_COMPONENT_HEIGHT = 90;
+
+const GROUP_Y_GAP = 18;
+const GROUP_X_GAP = 22;
+
+
+// -----------------------------------------------------------------------------
+// OCR
+// -----------------------------------------------------------------------------
+
+const OCR_SCALE = 5;
+
+const OCR_PADDING_X = 20;
+const OCR_PADDING_Y = 18;
+
+
+// ============================================================================
+// GENERIC HELPERS
+// ============================================================================
+
+function clamp(value, min, max) {
+    return Math.max(
+        min,
+        Math.min(max, value)
+    );
+}
+
+function safeNumber(value, fallback = 0) {
+    const n = Number(value);
+
+    return Number.isFinite(n)
+        ? n
+        : fallback;
+}
+
+
+// ============================================================================
+// QUESTION NUMBER NORMALIZATION
+// ============================================================================
+
+function normalizeOCRText(text) {
+    return String(text || "")
+        .replace(/\s+/g, "")
+        .replace(/[^0-9]/g, "");
+}
+
+
+function parseQuestionNumber(text) {
+    const normalized =
+        normalizeOCRText(text);
+
+    if (!normalized) {
+        return null;
+    }
+
+    if (!/^\d{1,2}$/.test(normalized)) {
+        return null;
+    }
+
+    const number =
+        Number(normalized);
+
+    if (
+        number < MIN_QUESTION_NO ||
+        number > MAX_QUESTION_NO
+    ) {
+        return null;
+    }
+
+    return number;
+}
+
+
+// ============================================================================
+// PIXEL CLASSIFICATION
+// ============================================================================
+
+function classifyPixel(r, g, b) {
+
+    const max =
+        Math.max(r, g, b);
+
+    const min =
+        Math.min(r, g, b);
+
+    const brightness =
+        (r + g + b) / 3;
+
+    const saturation =
+        max - min;
+
+
+    // Strong black / gray ink
+    const black =
+        brightness < 145 &&
+        saturation < 55;
+
+
+    // General dark ink
+    const dark =
+        brightness < 160;
+
+
+    // Blue
+    const blue =
+        b > r + 15 &&
+        b > g + 5 &&
+        b > 65;
+
+
+    // Red
+    const red =
+        r > g + 15 &&
+        r > b + 15 &&
+        r > 75;
+
+
+    const colored =
+        saturation > 22 &&
+        (blue || red);
+
+
+    return {
+        brightness,
+        saturation,
+        black,
+        dark,
+        blue,
+        red,
+        colored,
+    };
+}
+
+
+// ============================================================================
+// VERTICAL LINE DETECTION
+// ============================================================================
+//
+// Important improvement:
+//
+// Previous detector mainly depended on dark pixels.
+//
+// Page 7 has thin/light scanned vertical boundaries.
+//
+// Therefore each X gets:
+//
+// 1. Dark/ink continuity
+// 2. Local contrast against surrounding pixels
+// 3. Blue evidence
+// 4. Red evidence
+// 5. Black evidence
+// 6. Longest vertical run
+//
+// Horizontal ruling lines normally don't create long vertical continuity.
+// ============================================================================
+
+async function detectVerticalLines(
+    imagePath,
+    width,
+    height
+) {
+
+    const {
+        data,
+        info
+    } = await sharp(imagePath)
+        .removeAlpha()
+        .raw()
+        .toBuffer({
+            resolveWithObject: true
+        });
+
+
+    if (info.channels !== 3) {
+
+        throw new Error(
+            `Expected RGB image, got ${info.channels} channels`
+        );
+    }
+
+
+    const channels = 3;
+
+
+    const xStart =
+        clamp(
+            Math.floor(
+                width *
+                    COLUMN_SEARCH_START_PERCENT
+            ),
+            20,
+            width - 20
+        );
+
+
+    const xEnd =
+        clamp(
+            Math.floor(
+                width *
+                    COLUMN_SEARCH_END_PERCENT
+            ),
+            xStart + 10,
+            width - 20
+        );
+
+
+    const yStart =
+        clamp(
+            Math.floor(
+                height *
+                    COLUMN_SEARCH_TOP_PERCENT
+            ),
+            0,
+            height - 1
+        );
+
+
+    const yEnd =
+        clamp(
+            Math.floor(
+                height *
+                    COLUMN_SEARCH_BOTTOM_PERCENT
+            ),
+            yStart + 10,
+            height - 1
+        );
+
+
+    console.log(
+        `Column line search X: ${xStart} - ${xEnd}px`
+    );
+
+    console.log(
+        `Column line search Y: ${yStart} - ${yEnd}px`
+    );
+
+
+    const candidates = [];
+
+
+    // -------------------------------------------------------------------------
+    // Check every X
+    // -------------------------------------------------------------------------
+
+    for (
+        let x = xStart;
+        x <= xEnd;
+        x++
+    ) {
+
+        let strongRows = 0;
+
+        let contrastRows = 0;
+
+        let blueRows = 0;
+
+        let redRows = 0;
+
+        let blackRows = 0;
+
+
+        let currentRun = 0;
+
+        let longestRun = 0;
+
+
+        for (
+            let y = yStart;
+            y <= yEnd;
+            y++
+        ) {
+
+            let rowStrong = false;
+
+            let rowContrast = false;
+
+            let rowBlue = false;
+
+            let rowRed = false;
+
+            let rowBlack = false;
+
+
+            // -----------------------------------------------------------------
+            // Narrow horizontal tolerance
+            // -----------------------------------------------------------------
+
+            for (
+                let dx = -2;
+                dx <= 2;
+                dx++
+            ) {
+
+                const xx =
+                    x + dx;
+
+
+                if (
+                    xx < 0 ||
+                    xx >= width
+                ) {
+                    continue;
+                }
+
+
+                const idx =
+                    (
+                        y *
+                            width +
+                        xx
+                    ) *
+                    channels;
+
+
+                const r =
+                    data[idx];
+
+                const g =
+                    data[idx + 1];
+
+                const b =
+                    data[idx + 2];
+
+
+                const pixel =
+                    classifyPixel(
+                        r,
+                        g,
+                        b
+                    );
+
+
+                if (
+                    pixel.dark ||
+                    pixel.colored
+                ) {
+
+                    rowStrong = true;
+                }
+
+
+                if (pixel.blue) {
+
+                    rowBlue = true;
+                }
+
+
+                if (pixel.red) {
+
+                    rowRed = true;
+                }
+
+
+                if (pixel.black) {
+
+                    rowBlack = true;
+                }
+            }
+
+
+            // -----------------------------------------------------------------
+            // LIGHT GRAY / THIN LINE DETECTION
+            //
+            // Compare current X with surrounding X pixels.
+            //
+            // Example:
+            //
+            // white | gray line | white
+            //
+            // The line may not be dark enough for "dark".
+            // -----------------------------------------------------------------
+
+            let centerBrightnessSum = 0;
+
+            let neighborBrightnessSum = 0;
+
+            let centerCount = 0;
+
+            let neighborCount = 0;
+
+
+            // Center around X.
+            for (
+                let dx = -1;
+                dx <= 1;
+                dx++
+            ) {
+
+                const xx =
+                    x + dx;
+
+
+                if (
+                    xx < 0 ||
+                    xx >= width
+                ) {
+                    continue;
+                }
+
+
+                for (
+                    let dy = -1;
+                    dy <= 1;
+                    dy++
+                ) {
+
+                    const yy =
+                        y + dy;
+
+
+                    if (
+                        yy < yStart ||
+                        yy > yEnd
+                    ) {
+                        continue;
+                    }
+
+
+                    const idx =
+                        (
+                            yy *
+                                width +
+                            xx
+                        ) *
+                        channels;
+
+
+                    const brightness =
+                        (
+                            data[idx] +
+                            data[idx + 1] +
+                            data[idx + 2]
+                        ) / 3;
+
+
+                    centerBrightnessSum +=
+                        brightness;
+
+                    centerCount++;
+                }
+            }
+
+
+            // Surrounding X.
+            for (
+                let dx = -10;
+                dx <= 10;
+                dx++
+            ) {
+
+                if (
+                    dx >= -3 &&
+                    dx <= 3
+                ) {
+                    continue;
+                }
+
+
+                const xx =
+                    x + dx;
+
+
+                if (
+                    xx < 0 ||
+                    xx >= width
+                ) {
+                    continue;
+                }
+
+
+                const idx =
+                    (
+                        y *
+                            width +
+                        xx
+                    ) *
+                    channels;
+
+
+                const brightness =
+                    (
+                        data[idx] +
+                        data[idx + 1] +
+                        data[idx + 2]
+                    ) / 3;
+
+
+                neighborBrightnessSum +=
+                    brightness;
+
+                neighborCount++;
+            }
+
+
+            if (
+                centerCount > 0 &&
+                neighborCount > 0
+            ) {
+
+                const centerBrightness =
+                    centerBrightnessSum /
+                    centerCount;
+
+
+                const neighborBrightness =
+                    neighborBrightnessSum /
+                    neighborCount;
+
+
+                const localContrast =
+                    neighborBrightness -
+                    centerBrightness;
+
+
+                // Light line.
+                if (
+                    localContrast >= 7
+                ) {
+
+                    rowContrast = true;
+                }
+            }
+
+
+            const rowHasEvidence =
+                rowStrong ||
+                rowContrast;
+
+
+            if (rowHasEvidence) {
+
+                strongRows++;
+
+                currentRun++;
+
+
+                if (
+                    currentRun >
+                    longestRun
+                ) {
+
+                    longestRun =
+                        currentRun;
+                }
+
+            } else {
+
+                currentRun = 0;
+            }
+
+
+            if (rowContrast) {
+
+                contrastRows++;
+            }
+
+
+            if (rowBlue) {
+
+                blueRows++;
+            }
+
+
+            if (rowRed) {
+
+                redRows++;
+            }
+
+
+            if (rowBlack) {
+
+                blackRows++;
+            }
+        }
+
+
+        const totalRows =
+            yEnd -
+            yStart +
+            1;
+
+
+        const coverage =
+            strongRows /
+            totalRows;
+
+
+        const contrastCoverage =
+            contrastRows /
+            totalRows;
+
+
+        const blueCoverage =
+            blueRows /
+            totalRows;
+
+
+        const redCoverage =
+            redRows /
+            totalRows;
+
+
+        const blackCoverage =
+            blackRows /
+            totalRows;
+
+
+        const longestCoverage =
+            longestRun /
+            totalRows;
+
+
+        // -----------------------------------------------------------------
+        // Main score.
+        // -----------------------------------------------------------------
+
+        const score =
+            coverage * 40 +
+            longestCoverage * 30 +
+            contrastCoverage * 25 +
+            blueCoverage * 15 +
+            redCoverage * 15 +
+            blackCoverage * 10;
+
+
+        const qualifies =
+            coverage >=
+                LINE_MIN_COVERAGE ||
+
+            longestCoverage >=
+                LINE_MIN_LONGEST_RUN ||
+
+            contrastCoverage >=
+                0.28 ||
+
+            blueCoverage >=
+                0.12 ||
+
+            redCoverage >=
+                0.12;
+
+
+        if (qualifies) {
+
+            candidates.push({
+
+                x,
+
+                coverage,
+
+                contrastCoverage,
+
+                blueCoverage,
+
+                redCoverage,
+
+                blackCoverage,
+
+                longestCoverage,
+
+                score,
+            });
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Group adjacent X positions.
+    // -------------------------------------------------------------------------
+
+    const clusters = [];
+
+
+    for (
+        const item of candidates
+    ) {
+
+        const last =
+            clusters[
+                clusters.length - 1
+            ];
+
+
+        if (
+            last &&
+            item.x -
+                last.lastX <=
+                LINE_CLUSTER_GAP
+        ) {
+
+            last.items.push(item);
+
+            last.lastX =
+                item.x;
+
+        } else {
+
+            clusters.push({
+
+                items: [
+                    item
+                ],
+
+                firstX:
+                    item.x,
+
+                lastX:
+                    item.x,
+            });
+        }
+    }
+
+
+    // -------------------------------------------------------------------------
+    // Convert cluster -> one line
+    // -------------------------------------------------------------------------
+
+    const lines =
+        clusters
+            .map(cluster => {
+
+                const best =
+                    cluster.items.reduce(
+                        (
+                            a,
+                            b
+                        ) =>
+                            b.score >
+                            a.score
+                                ? b
+                                : a
+                    );
+
+
+                const weightedX =
+                    Math.round(
+
+                        cluster.items.reduce(
+                            (
+                                sum,
+                                item
+                            ) =>
+                                sum +
+                                item.x *
+                                    Math.max(
+                                        item.score,
+                                        1
+                                    ),
+                            0
+                        ) /
+
+                        cluster.items.reduce(
+                            (
+                                sum,
+                                item
+                            ) =>
+                                sum +
+                                Math.max(
+                                    item.score,
+                                    1
+                                ),
+                            0
+                        )
+                    );
+
+
+                return {
+
+                    x:
+                        weightedX,
+
+                    score:
+                        best.score,
+
+                    coverage:
+                        best.coverage,
+
+                    contrastCoverage:
+                        best.contrastCoverage,
+
+                    blueCoverage:
+                        best.blueCoverage,
+
+                    redCoverage:
+                        best.redCoverage,
+
+                    blackCoverage:
+                        best.blackCoverage,
+
+                    longestCoverage:
+                        best.longestCoverage,
+
+                    thickness:
+                        cluster.items.length,
+                };
+            })
+
+            .sort(
+                (a, b) =>
+                    a.x -
+                    b.x
+            );
+
+
+    return {
+
+        lines,
+
+        raw:
+            data,
+    };
+}
+
+
+// ============================================================================
+// SCORE COLUMN INTERIOR
+// ============================================================================
+//
+// This is secondary validation.
+//
+// A candidate pair should have a reasonable narrow interior area.
+//
+// We do NOT want to select a random pair of vertical lines simply because
+// both lines happen to be strong.
+//
+// ============================================================================
+
+async function scoreColumnInterior(
+    imagePath,
+    x1,
+    x2,
+    height
+) {
+
+    const width =
+        x2 - x1;
+
+
+    if (width <= 0) {
+
+        return {
+
+            score:
+                -Infinity,
+
+            inkCoverage:
+                0,
+
+            rowCoverage:
+                0,
+        };
+    }
+
+
+    const {
+        data,
+        info
+    } =
+        await sharp(
+            imagePath
+        )
+            .extract({
+
+                left:
+                    x1,
+
+                top:
+                    0,
+
+                width,
+
+                height,
+            })
+
+            .removeAlpha()
+
+            .raw()
+
+            .toBuffer({
+                resolveWithObject:
+                    true
+            });
+
+
+    const channels =
+        info.channels;
+
+
+    let darkPixels = 0;
+
+    let coloredPixels = 0;
+
+    let nonWhiteRows = 0;
+
+
+    for (
+        let y = 0;
+        y < height;
+        y++
+    ) {
+
+        let rowInk = 0;
+
+
+        for (
+            let x = 0;
+            x < width;
+            x++
+        ) {
+
+            const idx =
+                (
+                    y *
+                        width +
+                    x
+                ) *
+                channels;
+
+
+            const r =
+                data[idx];
+
+            const g =
+                data[idx + 1];
+
+            const b =
+                data[idx + 2];
+
+
+            const pixel =
+                classifyPixel(
+                    r,
+                    g,
+                    b
+                );
+
+
+            if (
+                pixel.dark ||
+                pixel.colored
+            ) {
+
+                darkPixels++;
+
+                rowInk++;
+            }
+
+
+            if (
+                pixel.blue ||
+                pixel.red
+            ) {
+
+                coloredPixels++;
+            }
+        }
+
+
+        if (
+            rowInk >= 2
+        ) {
+
+            nonWhiteRows++;
+        }
+    }
+
+
+    const totalPixels =
+        width *
+        height;
+
+
+    const inkCoverage =
+        totalPixels > 0
+            ? darkPixels /
+                totalPixels
+            : 0;
+
+
+    const rowCoverage =
+        height > 0
+            ? nonWhiteRows /
+                height
+            : 0;
+
+
+    let score =
+        rowCoverage * 30 +
+        inkCoverage * 100;
+
+
+    if (
+        width >= 30 &&
+        width <= 60
+    ) {
+
+        score += 12;
+    }
+
+
+    if (
+        coloredPixels > 0
+    ) {
+
+        score += 2;
+    }
+
+
+    return {
+
+        score,
+
+        inkCoverage,
+
+        rowCoverage,
+    };
+}
+
+
+// ============================================================================
+// FIND QUESTION NUMBER COLUMN
+// ============================================================================
+
+async function findQuestionNumberColumn(
+    lines,
+    width,
+    height,
+    imagePath
+) {
+
+    console.log("");
+
+    console.log(
+        "=============================================="
+    );
+
+    console.log(
+        "VERTICAL LINE CANDIDATES"
+    );
+
+    console.log(
+        "=============================================="
+    );
+
+
+    // Only use broad search area.
+    // It is NOT blank-space based.
+    const filteredLines =
+        [...lines]
+            .filter(line => {
+
+                return (
+                    line.x >=
+                        width *
+                            COLUMN_SEARCH_START_PERCENT &&
+
+                    line.x <=
+                        width *
+                            COLUMN_SEARCH_END_PERCENT
+                );
+            })
+
+            .sort(
+                (a, b) =>
+                    b.score -
+                    a.score
+            );
+
+
+    // Print strongest line candidates.
+    for (
+        const line of
+            filteredLines.slice(
+                0,
+                30
+            )
+    ) {
+
+        console.log(
+
+            `x=${line.x}, ` +
+
+            `score=${line.score.toFixed(1)}, ` +
+
+            `coverage=${(
+                line.coverage *
+                100
+            ).toFixed(1)}%, ` +
+
+            `contrast=${(
+                line.contrastCoverage *
+                100
+            ).toFixed(1)}%, ` +
+
+            `blue=${(
+                line.blueCoverage *
+                100
+            ).toFixed(1)}%, ` +
+
+            `red=${(
+                line.redCoverage *
+                100
+            ).toFixed(1)}%, ` +
+
+            `black=${(
+                line.blackCoverage *
+                100
+            ).toFixed(1)}%, ` +
+
+            `run=${(
+                line.longestCoverage *
+                100
+            ).toFixed(1)}%`
+        );
+    }
+
+
+    const possiblePairs = [];
+
+
+    // =========================================================================
+    // CASE A
+    //
+    // TWO REAL BOUNDARIES
+    //
+    //       x1           x2
+    //       | Question  |
+    // =========================================================================
+
+    for (
+        let i = 0;
+        i <
+        filteredLines.length;
+        i++
+    ) {
+
+        for (
+            let j = i + 1;
+            j <
+            filteredLines.length;
+            j++
+        ) {
+
+            const left =
+                filteredLines[i];
+
+
+            const right =
+                filteredLines[j];
+
+
+            if (
+                right.x <=
+                left.x
+            ) {
+
+                continue;
+            }
+
+
+            const columnWidth =
+                right.x -
+                left.x;
+
+
+            // Width constraint.
+            if (
+                columnWidth <
+                    MIN_COLUMN_WIDTH ||
+
+                columnWidth >
+                    MAX_COLUMN_WIDTH
+            ) {
+
+                continue;
+            }
+
+
+            const leftEvidence =
+                Math.max(
+
+                    left.coverage,
+
+                    left.contrastCoverage,
+
+                    left.blueCoverage,
+
+                    left.redCoverage,
+
+                    left.blackCoverage,
+
+                    left.longestCoverage
+                );
+
+
+            const rightEvidence =
+                Math.max(
+
+                    right.coverage,
+
+                    right.contrastCoverage,
+
+                    right.blueCoverage,
+
+                    right.redCoverage,
+
+                    right.blackCoverage,
+
+                    right.longestCoverage
+                );
+
+
+            if (
+                leftEvidence < 0.10 ||
+                rightEvidence < 0.10
+            ) {
+
+                continue;
+            }
+
+
+            // Check content inside proposed column.
+            const interior =
+                await scoreColumnInterior(
+
+                    imagePath,
+
+                    left.x + 2,
+
+                    right.x - 1,
+
+                    height
+                );
+
+
+            const widthPenalty =
+                Math.abs(
+                    columnWidth -
+                        44
+                ) * 1.4;
+
+
+            const center =
+                (
+                    left.x +
+                    right.x
+                ) / 2;
+
+
+            const centerPercent =
+                center /
+                width;
+
+
+            // Light location preference only.
+            // NOT blank-space calculation.
+            let positionBonus = 0;
+
+
+            if (
+                centerPercent >= 0.22 &&
+                centerPercent <= 0.38
+            ) {
+
+                positionBonus = 15;
+            }
+
+
+            // Two actual lines are strong evidence.
+            const pairScore =
+                left.score +
+
+                right.score +
+
+                interior.score *
+                    0.6 +
+
+                positionBonus -
+
+                widthPenalty;
+
+
+            possiblePairs.push({
+
+                x1:
+                    left.x,
+
+                x2:
+                    right.x,
+
+                width:
+                    columnWidth,
+
+                score:
+                    pairScore,
+
+                left,
+
+                right,
+
+                interior,
+
+                inferred:
+                    false,
+            });
+        }
+    }
+
+
+    // =========================================================================
+    // CASE B
+    //
+    // ONLY ONE BOUNDARY IS CLEARLY DETECTED
+    //
+    // Test both:
+    //
+    //   [line-width, line]
+    //
+    // and
+    //
+    //   [line, line+width]
+    //
+    // =========================================================================
+
+    for (
+        const line of
+            filteredLines.slice(
+                0,
+                12
+            )
+    ) {
+
+        for (
+            const expectedWidth of
+                EXPECTED_COLUMN_WIDTHS
+        ) {
+
+            const possibilities = [
+
+                {
+                    x1:
+                        line.x -
+                        expectedWidth,
+
+                    x2:
+                        line.x,
+                },
+
+                {
+                    x1:
+                        line.x,
+
+                    x2:
+                        line.x +
+                        expectedWidth,
+                },
+
+            ];
+
+
+            for (
+                const candidate of
+                    possibilities
+            ) {
+
+                // Keep candidate inside broad search.
+                if (
+
+                    candidate.x1 <
+                        width *
+                            COLUMN_SEARCH_START_PERCENT ||
+
+                    candidate.x2 >
+                        width *
+                            COLUMN_SEARCH_END_PERCENT
+
+                ) {
+
+                    continue;
+                }
+
+
+                const interior =
+                    await scoreColumnInterior(
+
+                        imagePath,
+
+                        candidate.x1 + 2,
+
+                        candidate.x2 - 1,
+
+                        height
+                    );
+
+
+                const center =
+                    (
+                        candidate.x1 +
+                        candidate.x2
+                    ) / 2;
+
+
+                const centerPercent =
+                    center /
+                    width;
+
+
+                let positionBonus = 0;
+
+
+                if (
+                    centerPercent >=
+                        0.22 &&
+                    centerPercent <=
+                        0.38
+                ) {
+
+                    positionBonus = 12;
+                }
+
+
+                const widthPenalty =
+                    Math.abs(
+                        expectedWidth -
+                            44
+                    ) * 1.2;
+
+
+                const inferredScore =
+                    line.score *
+                        0.95 +
+
+                    interior.score *
+                        0.55 +
+
+                    positionBonus -
+
+                    widthPenalty -
+
+                    20;
+
+
+                possiblePairs.push({
+
+                    x1:
+                        Math.round(
+                            candidate.x1
+                        ),
+
+                    x2:
+                        Math.round(
+                            candidate.x2
+                        ),
+
+                    width:
+                        expectedWidth,
+
+                    score:
+                        inferredScore,
+
+                    left:
+                        candidate.x1 ===
+                        line.x
+                            ? line
+                            : null,
+
+                    right:
+                        candidate.x2 ===
+                        line.x
+                            ? line
+                            : null,
+
+                    sourceLine:
+                        line.x,
+
+                    interior,
+
+                    inferred:
+                        true,
+                });
+            }
+        }
+    }
+
+
+    // =========================================================================
+    // SORT
+    // =========================================================================
+
+    possiblePairs.sort(
+        (a, b) =>
+            b.score -
+            a.score
+    );
+
+
+    console.log("");
+
+    console.log(
+        "POSSIBLE QUESTION COLUMN PAIRS"
+    );
+
+
+    for (
+        const pair of
+            possiblePairs.slice(
+                0,
+                20
+            )
+    ) {
+
+        console.log(
+
+            `x1=${pair.x1}, ` +
+
+            `x2=${pair.x2}, ` +
+
+            `width=${pair.width}, ` +
+
+            `score=${pair.score.toFixed(1)}, ` +
+
+            `inferred=${pair.inferred}, ` +
+
+            `interior=${pair.interior.score.toFixed(1)}`
+        );
+    }
+
+
+    if (
+        possiblePairs.length === 0
+    ) {
+
+        return null;
+    }
+
+
+    const realPairs =
+        possiblePairs.filter(
+            pair =>
+                !pair.inferred
+        );
+
+
+    const inferredPairs =
+        possiblePairs.filter(
+            pair =>
+                pair.inferred
+        );
+
+
+    let best =
+        possiblePairs[0];
+
+
+    // Prefer a real pair.
+    if (
+        realPairs.length > 0
+    ) {
+
+        const bestReal =
+            realPairs[0];
+
+
+        const bestInferred =
+            inferredPairs.length > 0
+                ? inferredPairs[0]
+                : null;
+
+
+        if (
+            !bestInferred ||
+
+            bestReal.score >=
+                bestInferred.score -
+                    25
+        ) {
+
+            best =
+                bestReal;
+        }
+    }
+
+
+    console.log("");
+
+    console.log(
+        "=============================================="
+    );
+
+    console.log(
+        "QUESTION NUMBER COLUMN DETECTED"
+    );
+
+    console.log(
+        "=============================================="
+    );
+
+
+    console.log(
+        `x1       = ${best.x1}`
+    );
+
+    console.log(
+        `x2       = ${best.x2}`
+    );
+
+    console.log(
+        `width    = ${best.width}`
+    );
+
+    console.log(
+        `score    = ${best.score.toFixed(1)}`
+    );
+
+    console.log(
+        `inferred = ${best.inferred}`
+    );
+
+
+    return {
+
+        x1:
+            Math.round(
+                best.x1
+            ),
+
+        x2:
+            Math.round(
+                best.x2
+            ),
+
+        width:
+            Math.round(
+                best.x2 -
+                    best.x1
+            ),
+
+        score:
+            best.score,
+
+        inferred:
+            best.inferred,
+    };
+}
+
+
+// ============================================================================
+// CREATE EXPANDED QUESTION NUMBER ROI
+// ============================================================================
+
+function createQuestionROI(
+    column,
+    imageWidth
+) {
+
+    const x1 =
+        clamp(
+
+            column.x1 -
+                COLUMN_PADDING_LEFT,
+
+            0,
+
+            imageWidth - 1
+        );
+
+
+    const x2 =
+        clamp(
+
+            column.x2 +
+                COLUMN_PADDING_RIGHT,
+
+            x1 + 1,
+
+            imageWidth
+        );
+
+
+    return {
+
+        x1,
+
+        x2,
+
+        width:
+            x2 - x1,
+    };
+}
+
+
+// ============================================================================
+// CLEAN OCR ROI
+// ============================================================================
+//
+// Keep dark handwriting.
+//
+// Remove strongly coloured blue/red ruling lines.
+//
+// ============================================================================
+
+function cleanROI(
+    data,
+    width,
+    height
+) {
+
+    const output =
+        Buffer.alloc(
+            width *
+                height
+        );
+
+
+    for (
+        let i = 0,
+            p = 0;
+
+        i <
+        width * height;
+
+        i++,
+            p += 3
+    ) {
+
+        const r =
+            data[p];
+
+        const g =
+            data[p + 1];
+
+        const b =
+            data[p + 2];
+
+
+        const brightness =
+            (r + g + b) /
+            3;
+
+
+        const saturation =
+            Math.max(
+                r,
+                g,
+                b
+            ) -
+            Math.min(
+                r,
+                g,
+                b
+            );
+
+
+        // Preserve dark handwriting.
+        if (
+            brightness < 130
+        ) {
+
+            output[i] =
+                Math.round(
+                    brightness
+                );
+
+            continue;
+        }
+
+
+        const isBlue =
+            b > r + 20 &&
+            b > g + 8 &&
+            b > 70;
+
+
+        const isRed =
+            r > g + 20 &&
+            r > b + 20 &&
+            r > 75;
+
+
+        // Remove coloured ruling.
+        if (
+            (isBlue || isRed) &&
+            saturation > 35
+        ) {
+
+            output[i] =
+                255;
+
+            continue;
+        }
+
+
+        output[i] =
+            Math.round(
+                brightness
+            );
+    }
+
+
+    return output;
+}
+
+
+// ============================================================================
+// CONNECTED COMPONENTS
+// ============================================================================
+
+function findConnectedComponents(
+    binary,
+    width,
+    height
+) {
+
+    const visited =
+        new Uint8Array(
+            width *
+                height
+        );
+
+
+    const components = [];
+
+
+    const neighbours = [
+
+        [-1, -1],
+
+        [0, -1],
+
+        [1, -1],
+
+        [-1, 0],
+
+        [1, 0],
+
+        [-1, 1],
+
+        [0, 1],
+
+        [1, 1],
+
+    ];
+
+
+    for (
+        let y = 0;
+        y < height;
+        y++
+    ) {
+
+        for (
+            let x = 0;
+            x < width;
+            x++
+        ) {
+
+            const start =
+                y *
+                    width +
+                x;
+
+
+            if (
+                visited[start]
+            ) {
+
+                continue;
+            }
+
+
+            // White.
+            if (
+                binary[start] >=
+                190
+            ) {
+
+                visited[start] =
+                    1;
+
+                continue;
+            }
+
+
+            const queue = [
+                start
+            ];
+
+
+            visited[start] =
+                1;
+
+
+            let minX = x;
+
+            let maxX = x;
+
+            let minY = y;
+
+            let maxY = y;
+
+
+            let area = 0;
+
+
+            for (
+                let qi = 0;
+                qi < queue.length;
+                qi++
+            ) {
+
+                const index =
+                    queue[qi];
+
+
+                const cy =
+                    Math.floor(
+                        index /
+                            width
+                    );
+
+
+                const cx =
+                    index -
+                    cy * width;
+
+
+                area++;
+
+
+                minX =
+                    Math.min(
+                        minX,
+                        cx
+                    );
+
+
+                maxX =
+                    Math.max(
+                        maxX,
+                        cx
+                    );
+
+
+                minY =
+                    Math.min(
+                        minY,
+                        cy
+                    );
+
+
+                maxY =
+                    Math.max(
+                        maxY,
+                        cy
+                    );
+
+
+                for (
+                    const [
+                        dx,
+                        dy
+                    ] of neighbours
+                ) {
+
+                    const nx =
+                        cx +
+                        dx;
+
+
+                    const ny =
+                        cy +
+                        dy;
+
+
+                    if (
+                        nx < 0 ||
+                        nx >= width ||
+                        ny < 0 ||
+                        ny >= height
+                    ) {
+
+                        continue;
+                    }
+
+
+                    const ni =
+                        ny *
+                            width +
+                        nx;
+
+
+                    if (
+                        visited[ni]
+                    ) {
+
+                        continue;
+                    }
+
+
+                    visited[ni] =
+                        1;
+
+
+                    if (
+                        binary[ni] <
+                        190
+                    ) {
+
+                        queue.push(
+                            ni
+                        );
+                    }
+                }
+            }
+
+
+            const componentWidth =
+                maxX -
+                minX +
+                1;
+
+
+            const componentHeight =
+                maxY -
+                minY +
+                1;
+
+
+            if (
+
+                area >=
+                    MIN_COMPONENT_AREA &&
+
+                area <=
+                    MAX_COMPONENT_AREA &&
+
+                componentWidth >=
+                    MIN_COMPONENT_WIDTH &&
+
+                componentWidth <=
+                    MAX_COMPONENT_WIDTH &&
+
+                componentHeight >=
+                    MIN_COMPONENT_HEIGHT &&
+
+                componentHeight <=
+                    MAX_COMPONENT_HEIGHT
+
+            ) {
+
+                components.push({
+
+                    x:
+                        minX,
+
+                    y:
+                        minY,
+
+                    width:
+                        componentWidth,
+
+                    height:
+                        componentHeight,
+
+                    area,
+                });
+            }
+        }
+    }
+
+
+    return components;
+}
+
+
+// ============================================================================
+// GROUP COMPONENTS
+// ============================================================================
+
+function groupComponents(
+    components
+) {
+
+    const sorted =
+        [...components].sort(
+
+            (a, b) =>
+
+                a.y - b.y ||
+
+                a.x - b.x
+        );
+
+
+    const groups = [];
+
+
+    for (
+        const component of
+            sorted
+    ) {
+
+        let target =
+            null;
+
+
+        for (
+            let i =
+                groups.length -
+                1;
+
+            i >= 0;
+
+            i--
+        ) {
+
+            const group =
+                groups[i];
+
+
+            const groupRight =
+                group.x +
+                group.width;
+
+
+            const groupBottom =
+                group.y +
+                group.height;
+
+
+            const componentRight =
+                component.x +
+                component.width;
+
+
+            const componentBottom =
+                component.y +
+                component.height;
+
+
+            const yDistance =
+                component.y -
+                groupBottom;
+
+
+            const xDistance =
+                component.x -
+                groupRight;
+
+
+            const overlapY =
+                component.y <
+                    groupBottom &&
+
+                componentBottom >
+                    group.y;
+
+
+            const closeY =
+                yDistance <=
+                GROUP_Y_GAP;
+
+
+            const closeX =
+                Math.abs(
+                    xDistance
+                ) <=
+                GROUP_X_GAP;
+
+
+            if (
+                overlapY &&
+                closeX
+            ) {
+
+                target =
+                    group;
+
+                break;
+            }
+
+
+            if (
+
+                closeY &&
+
+                Math.abs(
+                    component.x -
+                        group.x
+                ) <=
+                    GROUP_X_GAP
+
+            ) {
+
+                target =
+                    group;
+
+                break;
+            }
+        }
+
+
+        if (!target) {
+
+            groups.push({
+
+                x:
+                    component.x,
+
+                y:
+                    component.y,
+
+                width:
+                    component.width,
+
+                height:
+                    component.height,
+
+                area:
+                    component.area,
+
+                components: [
+                    component
+                ],
+            });
+
+            continue;
+        }
+
+
+        target.components.push(
+            component
+        );
+
+
+        const minX =
+            Math.min(
+                target.x,
+                component.x
+            );
+
+
+        const minY =
+            Math.min(
+                target.y,
+                component.y
+            );
+
+
+        const maxX =
+            Math.max(
+
+                target.x +
+                    target.width,
+
+                component.x +
+                    component.width
+            );
+
+
+        const maxY =
+            Math.max(
+
+                target.y +
+                    target.height,
+
+                component.y +
+                    component.height
+            );
+
+
+        target.x =
+            minX;
+
+        target.y =
+            minY;
+
+        target.width =
+            maxX -
+            minX;
+
+        target.height =
+            maxY -
+            minY;
+
+        target.area +=
+            component.area;
+    }
+
+
+    return groups;
+}
+
+
+// ============================================================================
+// FILTER CANDIDATES
+// ============================================================================
+
+function filterCandidateGroups(
+    groups,
+    roiWidth,
+    roiHeight
+) {
+
+    return groups
+
+        .filter(group => {
+
+            if (
+                group.width < 5 ||
+                group.width > 100
+            ) {
+
+                return false;
+            }
+
+
+            if (
+                group.height < 8 ||
+                group.height > 100
+            ) {
+
+                return false;
+            }
+
+
+            const ratio =
+                group.width /
+                group.height;
+
+
+            if (
+                ratio > 5
+            ) {
+
+                return false;
+            }
+
+
+            if (
+                group.area < 8
+            ) {
+
+                return false;
+            }
+
+
+            // Ignore only extreme top noise.
+            if (
+                group.y <
+                roiHeight * 0.025
+            ) {
+
+                return false;
+            }
+
+
+            return true;
+        })
+
+        .sort(
+            (a, b) =>
+                a.y -
+                b.y
+        );
+}
+
+
+// ============================================================================
+// CREATE OCR IMAGE
+// ============================================================================
+
+async function createOCRImage(
+    imagePath,
+    candidate,
+    roi
+) {
+
+    const metadata =
+        await sharp(
+            imagePath
+        ).metadata();
+
+
+    const imageWidth =
+        safeNumber(
+            metadata.width
+        );
+
+
+    const imageHeight =
+        safeNumber(
+            metadata.height
+        );
+
+
+    // Candidate coordinates are relative to expanded ROI.
+    const pageX =
+        roi.x1 +
+        candidate.x;
+
+
+    const pageY =
+        candidate.y;
+
+
+    const left =
+        clamp(
+
+            Math.floor(
+                pageX -
+                    OCR_PADDING_X
+            ),
+
+            0,
+
+            imageWidth - 1
+        );
+
+
+    const top =
+        clamp(
+
+            Math.floor(
+                pageY -
+                    OCR_PADDING_Y
+            ),
+
+            0,
+
+            imageHeight - 1
+        );
+
+
+    const right =
+        clamp(
+
+            Math.ceil(
+                pageX +
+                    candidate.width +
+                    OCR_PADDING_X
+            ),
+
+            left + 1,
+
+            imageWidth
+        );
+
+
+    const bottom =
+        clamp(
+
+            Math.ceil(
+                pageY +
+                    candidate.height +
+                    OCR_PADDING_Y
+            ),
+
+            top + 1,
+
+            imageHeight
+        );
+
+
+    const cropWidth =
+        right -
+        left;
+
+
+    const cropHeight =
+        bottom -
+        top;
+
+
+    const rawCrop =
+        await sharp(
+            imagePath
+        )
+
+            .extract({
+
+                left,
+
+                top,
+
+                width:
+                    cropWidth,
+
+                height:
+                    cropHeight,
+            })
+
+            .removeAlpha()
+
+            .raw()
+
+            .toBuffer();
+
+
+    const cleaned =
+        cleanROI(
+
+            rawCrop,
+
+            cropWidth,
+
+            cropHeight
+        );
+
+
+    // -------------------------------------------------------------------------
+    // Normal
+    // -------------------------------------------------------------------------
+
+    const normalBuffer =
+        await sharp(
+            cleaned,
+            {
+
+                raw: {
+
+                    width:
+                        cropWidth,
+
+                    height:
+                        cropHeight,
+
+                    channels:
+                        1,
+                },
+            }
+        )
+
+            .resize({
+
+                width:
+                    cropWidth *
+                    OCR_SCALE,
+
+                height:
+                    cropHeight *
+                    OCR_SCALE,
+
+                fit:
+                    "fill",
+            })
+
+            .normalize()
+
+            .sharpen()
+
+            .png()
+
+            .toBuffer();
+
+
+    // -------------------------------------------------------------------------
+    // Threshold 175
+    // -------------------------------------------------------------------------
+
+    const threshold175 =
+        await sharp(
+            cleaned,
+            {
+
+                raw: {
+
+                    width:
+                        cropWidth,
+
+                    height:
+                        cropHeight,
+
+                    channels:
+                        1,
+                },
+            }
+        )
+
+            .resize({
+
+                width:
+                    cropWidth *
+                    OCR_SCALE,
+
+                height:
+                    cropHeight *
+                    OCR_SCALE,
+
+                fit:
+                    "fill",
+            })
+
+            .normalize()
+
+            .threshold(175)
+
+            .png()
+
+            .toBuffer();
+
+
+    // -------------------------------------------------------------------------
+    // Threshold 205
+    // -------------------------------------------------------------------------
+
+    const threshold205 =
+        await sharp(
+            cleaned,
+            {
+
+                raw: {
+
+                    width:
+                        cropWidth,
+
+                    height:
+                        cropHeight,
+
+                    channels:
+                        1,
+                },
+            }
+        )
+
+            .resize({
+
+                width:
+                    cropWidth *
+                    OCR_SCALE,
+
+                height:
+                    cropHeight *
+                    OCR_SCALE,
+
+                fit:
+                    "fill",
+            })
+
+            .normalize()
+
+            .threshold(205)
+
+            .png()
+
+            .toBuffer();
+
+
+    return {
+
+        buffer:
+            normalBuffer,
+
+        thresholdBuffer:
+            threshold175,
+
+        thresholdSoftBuffer:
+            threshold205,
+
+        left,
+
+        top,
+
+        width:
+            cropWidth,
+
+        height:
+            cropHeight,
+    };
+}
+
+
+// ============================================================================
+// OCR ONE CANDIDATE
+// ============================================================================
+
+async function OCRCandidate(
+    worker,
+    crop,
+    candidate
+) {
+
+    try {
+
+        const variants = [
+
+            {
+                name:
+                    "normal",
+
+                buffer:
+                    crop.buffer,
+            },
+
+            {
+                name:
+                    "threshold175",
+
+                buffer:
+                    crop.thresholdBuffer,
+            },
+
+            {
+                name:
+                    "threshold205",
+
+                buffer:
+                    crop.thresholdSoftBuffer,
+            },
+
+        ];
+
+
+        const results = [];
+
+
+        for (
+            const variant of
+                variants
+        ) {
+
+            const result =
+                await worker.recognize(
+                    variant.buffer
+                );
+
+
+            const text =
+                normalizeOCRText(
+
+                    result?.data
+                        ?.text ||
+                        ""
+                );
+
+
+            const qNo =
+                parseQuestionNumber(
+                    text
+                );
+
+
+            const confidence =
+                Number(
+
+                    result?.data
+                        ?.confidence ||
+                        0
+                );
+
+
+            console.log(
+
+                "[OCR VARIANT]",
+
+                {
+
+                    x:
+                        candidate.pageX,
+
+                    y:
+                        candidate.y,
+
+                    variant:
+                        variant.name,
+
+                    text,
+
+                    qNo,
+
+                    confidence,
+                }
+            );
+
+
+            if (
+                qNo !== null
+            ) {
+
+                results.push({
+
+                    qNo,
+
+                    confidence,
+
+                    variant:
+                        variant.name,
+                });
+            }
+        }
+
+
+        if (
+            results.length === 0
+        ) {
+
+            console.log(
+                "[OCR FAILED]",
+                {
+
+                    x:
+                        candidate.pageX,
+
+                    y:
+                        candidate.y,
+                }
+            );
+
+
+            return null;
+        }
+
+
+        // ---------------------------------------------------------------------
+        // Consensus
+        // ---------------------------------------------------------------------
+
+        const votes =
+            new Map();
+
+
+        for (
+            const result of
+                results
+        ) {
+
+            const existing =
+                votes.get(
+                    result.qNo
+                );
+
+
+            if (!existing) {
+
+                votes.set(
+
+                    result.qNo,
+
+                    {
+
+                        count:
+                            1,
+
+                        best:
+                            result,
+                    }
+                );
+
+            } else {
+
+                existing.count++;
+
+
+                if (
+                    result.confidence >
+                    existing.best.confidence
+                ) {
+
+                    existing.best =
+                        result;
+                }
+            }
+        }
+
+
+        const ranked =
+            [
+                ...votes.entries()
+            ]
+
+                .sort(
+                    (a, b) => {
+
+                        const aValue =
+                            a[1].count *
+                                100 +
+
+                            a[1].best
+                                .confidence;
+
+
+                        const bValue =
+                            b[1].count *
+                                100 +
+
+                            b[1].best
+                                .confidence;
+
+
+                        return (
+                            bValue -
+                            aValue
+                        );
+                    }
+                );
+
+
+        const [
+            qNo,
+            vote
+        ] =
+            ranked[0];
+
+
+        // Accept:
+        // 2 variants agree
+        // OR one high confidence result.
+        const accepted =
+            vote.count >= 2 ||
+            vote.best.confidence >= 60;
+
+
+        console.log(
+
+            "[OCR CONSENSUS]",
+
+            {
+
+                qNo,
+
+                votes:
+                    vote.count,
+
+                confidence:
+                    vote.best.confidence,
+
+                accepted,
+            }
+        );
+
+
+        if (!accepted) {
+
+            return null;
+        }
+
+
+        return {
+
+            qNo,
+
+            confidence:
+                vote.best
+                    .confidence,
+
+            variant:
+                vote.best.variant,
+        };
+
+    } catch (error) {
+
+        console.error(
+
+            "[OCR CANDIDATE ERROR]",
+
+            {
+
+                x:
+                    candidate?.pageX,
+
+                y:
+                    candidate?.y,
+
+                error:
+                    error?.message ||
+                    error,
+            }
+        );
+
+
+        return null;
+    }
+}
+
+
+// ============================================================================
+// SAVE DEBUG IMAGE
+// ============================================================================
+//
+// Output:
+//
+// question-number-column.png
+//     -> just expanded OCR ROI
+//
+// column-detection-debug.png
+//     -> whole page with:
+//        red   = actual detected column
+//        cyan  = expanded ROI
+//        yellow = line candidates
+//        green = candidate OCR boxes
+// ============================================================================
+
+async function saveColumnDebugImage(
+    imagePath,
+    outputPath,
+    width,
+    height,
+    column,
+    roi,
+    lines,
+    candidates
+) {
+
+    const lineElements =
+        lines
+
+            .filter(line =>
+                line.x >= 0 &&
+                line.x < width
+            )
+
+            .slice(
+                0,
+                25
+            )
+
+            .map(line => {
+
+                const opacity =
+                    clamp(
+
+                        line.score /
+                            100,
+
+                        0.15,
+
+                        0.75
+                    );
+
+
+                return `
+                    <line
+                        x1="${line.x}"
+                        y1="80"
+                        x2="${line.x}"
+                        y2="${height - 40}"
+                        stroke="yellow"
+                        stroke-width="2"
+                        opacity="${opacity}"
+                    />
+                `;
+            })
+
+            .join("");
+
+
+    const candidateElements =
+        candidates
+
+            .map(c => {
+
+                return `
+                    <rect
+                        x="${roi.x1 + c.x}"
+                        y="${c.y}"
+                        width="${c.width}"
+                        height="${c.height}"
+                        fill="none"
+                        stroke="lime"
+                        stroke-width="2"
+                    />
+                `;
+            })
+
+            .join("");
+
+
+    const svg = `
+        <svg
+            width="${width}"
+            height="${height}"
+            xmlns="http://www.w3.org/2000/svg"
+        >
+
+            ${lineElements}
+
+            <!-- Actual detected Question Number column -->
+            <rect
+                x="${column.x1}"
+                y="0"
+                width="${column.x2 - column.x1}"
+                height="${height}"
+                fill="none"
+                stroke="red"
+                stroke-width="5"
+            />
+
+            <!-- Expanded OCR ROI -->
+            <rect
+                x="${roi.x1}"
+                y="0"
+                width="${roi.width}"
+                height="${height}"
+                fill="none"
+                stroke="cyan"
+                stroke-width="3"
+                stroke-dasharray="10 8"
+            />
+
+            ${candidateElements}
+
+        </svg>
+    `;
+
+
+    const debugPath =
+        path.join(
+
+            outputPath,
+
+            "column-detection-debug.png"
+        );
+
+
+    await sharp(
+        imagePath
+    )
+
+        .composite([
+            {
+
+                input:
+                    Buffer.from(svg),
+
+                top:
+                    0,
+
+                left:
+                    0,
+            }
+        ])
+
+        .png()
+
+        .toFile(
+            debugPath
+        );
+
+
+    console.log(
+        `Saved debug overlay: ${debugPath}`
+    );
+}
+
+
+// ============================================================================
+// MAIN
+// ============================================================================
+
+async function main() {
+
+    const imagePath =
+        process.argv[2];
+
+
+    const outputPath =
+        process.argv[3];
+
+
+    if (
+        !imagePath ||
+        !outputPath
+    ) {
+
+        console.error(
+
+            "Usage: node ocrQuestionDetector.mjs <imagePath> <outputDir>"
+        );
+
+
+        process.exit(1);
+    }
+
+
+    await fs.mkdir(
+
+        outputPath,
+
+        {
+            recursive:
+                true,
+        }
+    );
+
+
+    const metadata =
+        await sharp(
+            imagePath
+        ).metadata();
+
+
+    const width =
+        safeNumber(
+            metadata.width
+        );
+
+
+    const height =
+        safeNumber(
+            metadata.height
+        );
+
+
+    if (
+        !width ||
+        !height
+    ) {
+
+        throw new Error(
+            "Unable to read image dimensions"
+        );
+    }
+
+
+    console.log("");
+
+    console.log(
+        "=============================================="
+    );
+
+    console.log(
+        "OCR QUESTION DETECTOR"
+    );
+
+    console.log(
+        "=============================================="
+    );
+
+
+    console.log(
+        `Image: ${imagePath}`
+    );
+
+
+    console.log(
+        `Size: ${width}x${height}`
+    );
+
+
+    // =========================================================================
+    // 1. DETECT VERTICAL LINES
+    // =========================================================================
+
+    const {
+        lines
+    } =
+        await detectVerticalLines(
+
+            imagePath,
+
+            width,
+
+            height
+        );
+
+
+    // =========================================================================
+    // 2. FIND QUESTION NUMBER COLUMN
+    // =========================================================================
+
+    const column =
+        await findQuestionNumberColumn(
+
+            lines,
+
+            width,
+
+            height,
+
+            imagePath
+        );
+
+
+    // =========================================================================
+    // COLUMN NOT FOUND
+    // =========================================================================
+
+    if (!column) {
+
+        console.log("");
+
+        console.log(
+            "=============================================="
+        );
+
+        console.log(
+            "QUESTION NUMBER COLUMN NOT DETECTED"
+        );
+
+        console.log(
+            "=============================================="
+        );
+
+
+        const result = {
+
+            pageWidth:
+                width,
+
+            pageHeight:
+                height,
+
+            questionNumberColumn:
+                null,
+
+            questions:
+                [],
+        };
+
+
+        console.log(
+
+            JSON.stringify(
+                result,
+                null,
+                2
+            )
+        );
+
+
+        return;
+    }
+
+
+    // =========================================================================
+    // 3. EXPAND ACTUAL COLUMN
+    // =========================================================================
+
+    const roi =
+        createQuestionROI(
+
+            column,
+
+            width
+        );
+
+
+    console.log("");
+
+    console.log(
+        "=============================================="
+    );
+
+    console.log(
+        "EXPANDED QUESTION NUMBER ROI"
+    );
+
+    console.log(
+        "=============================================="
+    );
+
+
+    console.log(
+        `Original column: ${column.x1} - ${column.x2}`
+    );
+
+
+    console.log(
+        `Expanded ROI:    ${roi.x1} - ${roi.x2}`
+    );
+
+
+    console.log(
+        `Left padding:    ${COLUMN_PADDING_LEFT}px`
+    );
+
+
+    console.log(
+        `Right padding:   ${COLUMN_PADDING_RIGHT}px`
+    );
+
+
+    // =========================================================================
+    // 4. SAVE COLUMN ROI
+    // =========================================================================
+
+    const columnImagePath =
+        path.join(
+
+            outputPath,
+
+            "question-number-column.png"
+        );
+
+
+    await sharp(
+        imagePath
+    )
+
+        .extract({
+
+            left:
+                roi.x1,
+
+            top:
+                0,
+
+            width:
+                roi.width,
+
+            height,
+        })
+
+        .png()
+
+        .toFile(
+            columnImagePath
+        );
+
+
+    console.log(
+        `Saved column ROI: ${columnImagePath}`
+    );
+
+
+    // =========================================================================
+    // 5. EXTRACT ROI
+    // =========================================================================
+
+    const roiRaw =
+        await sharp(
+            imagePath
+        )
+
+            .extract({
+
+                left:
+                    roi.x1,
+
+                top:
+                    0,
+
+                width:
+                    roi.width,
+
+                height,
+            })
+
+            .removeAlpha()
+
+            .raw()
+
+            .toBuffer();
+
+
+    const cleaned =
+        cleanROI(
+
+            roiRaw,
+
+            roi.width,
+
+            height
+        );
+
+
+    // =========================================================================
+    // 6. CANDIDATE DETECTION
+    // =========================================================================
+
+    const components =
+        findConnectedComponents(
+
+            cleaned,
+
+            roi.width,
+
+            height
+        );
+
+
+    console.log("");
+
+    console.log(
+        `Components found: ${components.length}`
+    );
+
+
+    const groups =
+        groupComponents(
+            components
+        );
+
+
+    console.log(
+        `Candidate groups: ${groups.length}`
+    );
+
+
+    const candidates =
+        filterCandidateGroups(
+
+            groups,
+
+            roi.width,
+
+            height
+        );
+
+
+    console.log(
+        `Candidates after filtering: ${candidates.length}`
+    );
+
+
+    // =========================================================================
+    // 7. PRINT CANDIDATES
+    // =========================================================================
+
+    console.log("");
+
+    console.log(
+        "CANDIDATES"
+    );
+
+
+    candidates.forEach(
+        (
+            candidate,
+            index
+        ) => {
+
+            candidate.pageX =
+                roi.x1 +
+                candidate.x;
+
+
+            console.log(
+
+                `[${index + 1}]`,
+
+                {
+
+                    pageX:
+                        candidate.pageX,
+
+                    y:
+                        candidate.y,
+
+                    width:
+                        candidate.width,
+
+                    height:
+                        candidate.height,
+
+                    area:
+                        candidate.area,
+                }
+            );
+        }
+    );
+
+
+    // =========================================================================
+    // 8. SAVE DEBUG OVERLAY
+    // =========================================================================
+
+    await saveColumnDebugImage(
+
+        imagePath,
+
+        outputPath,
+
+        width,
+
+        height,
+
+        column,
+
+        roi,
+
+        lines,
+
+        candidates
+    );
+
+
+    // =========================================================================
+    // 9. TESSERACT
+    // =========================================================================
+
+    const worker =
+        await createWorker(
+            "eng"
+        );
+
+
+    try {
+
+        await worker.setParameters({
+
+            tessedit_char_whitelist:
+                "0123456789",
+
+            user_defined_dpi:
+                "300",
+
+        });
+
+
+        const detections = [];
+
+
+        // =====================================================================
+        // 10. OCR ONLY INSIDE QUESTION NUMBER ROI
+        // =====================================================================
+
+        for (
+            let index = 0;
+            index <
+            candidates.length;
+            index++
+        ) {
+
+            const candidate =
+                candidates[index];
+
+
+            try {
+
+                const crop =
+                    await createOCRImage(
+
+                        imagePath,
+
+                        candidate,
+
+                        roi
+                    );
+
+
+                const candidateName =
+                    `candidate-${String(
+                        index + 1
+                    ).padStart(
+                        3,
+                        "0"
+                    )}`;
+
+
+                // -------------------------------------------------------------
+                // Save normal OCR crop.
+                // -------------------------------------------------------------
+
+                await fs.writeFile(
+
+                    path.join(
+
+                        outputPath,
+
+                        `${candidateName}-normal.png`
+                    ),
+
+                    crop.buffer
+                );
+
+
+                // -------------------------------------------------------------
+                // Save threshold 175.
+                // -------------------------------------------------------------
+
+                await fs.writeFile(
+
+                    path.join(
+
+                        outputPath,
+
+                        `${candidateName}-threshold175.png`
+                    ),
+
+                    crop.thresholdBuffer
+                );
+
+
+                // -------------------------------------------------------------
+                // Save threshold 205.
+                // -------------------------------------------------------------
+
+                await fs.writeFile(
+
+                    path.join(
+
+                        outputPath,
+
+                        `${candidateName}-threshold205.png`
+                    ),
+
+                    crop.thresholdSoftBuffer
+                );
+
+
+                console.log(
+
+                    `Saved OCR crops for candidate ${index + 1}`
+                );
+
+
+                const result =
+                    await OCRCandidate(
+
+                        worker,
+
+                        crop,
+
+                        candidate
+                    );
+
+
+                if (!result) {
+
+                    continue;
+                }
+
+
+                if (
+
+                    result.qNo <
+                        MIN_QUESTION_NO ||
+
+                    result.qNo >
+                        MAX_QUESTION_NO
+
+                ) {
+
+                    continue;
+                }
+
+
+                detections.push({
+
+                    qNo:
+                        result.qNo,
+
+                    yTop:
+                        crop.top,
+
+                    yBottom:
+                        crop.top +
+                        crop.height,
+
+                    yCenter:
+                        Math.round(
+
+                            crop.top +
+
+                            crop.height /
+                                2
+                        ),
+
+                    confidence:
+                        result.confidence,
+
+                    detectionMethod:
+                        "ocr",
+                });
+
+
+            } catch (error) {
+
+                console.error(
+
+                    `[Candidate ${index + 1}] failed:`,
+
+                    error
+                );
+            }
+        }
+
+
+        // =========================================================================
+        // 11. SORT BY Y
+        // =========================================================================
+
+        detections.sort(
+
+            (a, b) =>
+                a.yCenter -
+                b.yCenter
+        );
+
+
+        // =========================================================================
+        // 12. REMOVE DUPLICATES
+        // =========================================================================
+
+        const finalDetections = [];
+
+
+        for (
+            const detection of
+                detections
+        ) {
+
+            const duplicate =
+                finalDetections.find(
+
+                    existing =>
+
+                        existing.qNo ===
+                            detection.qNo &&
+
+                        Math.abs(
+
+                            existing.yCenter -
+                            detection.yCenter
+
+                        ) < 45
+                );
+
+
+            if (!duplicate) {
+
+                finalDetections.push(
+                    detection
+                );
+
+            } else if (
+
+                detection.confidence >
+                duplicate.confidence
+
+            ) {
+
+                duplicate.confidence =
+                    detection.confidence;
+
+
+                duplicate.yTop =
+                    detection.yTop;
+
+
+                duplicate.yBottom =
+                    detection.yBottom;
+
+
+                duplicate.yCenter =
+                    detection.yCenter;
+            }
+        }
+
+
+        // =========================================================================
+        // 13. FINAL RESULT
+        // =========================================================================
+
+        console.log("");
+
+        console.log(
+            "=============================================="
+        );
+
+        console.log(
+            "FINAL QUESTION DETECTIONS"
+        );
+
+        console.log(
+            "=============================================="
+        );
+
+
+        console.log(
+            finalDetections
+        );
+
+
+        const finalResult = {
+
+            pageWidth:
+                width,
+
+            pageHeight:
+                height,
+
+
+            questionNumberColumn:
+                {
+
+                    x1:
+                        column.x1,
+
+                    x2:
+                        column.x2,
+
+                    width:
+                        column.width,
+
+                    inferred:
+                        column.inferred,
+                },
+
+
+            expandedQuestionNumberROI:
+                {
+
+                    x1:
+                        roi.x1,
+
+                    x2:
+                        roi.x2,
+
+                    width:
+                        roi.width,
+                },
+
+
+            questions:
+                finalDetections,
+        };
+
+
+        console.log("");
+
+        console.log(
+
+            JSON.stringify(
+
+                finalResult,
+
+                null,
+
+                2
+            )
+        );
+
+
+    } finally {
+
+        await worker.terminate();
+    }
+}
+
+
+// ============================================================================
+// RUN
+// ============================================================================
+
+main().catch(error => {
+
+    console.error(
+
+        "OCR detector failed:",
+
+        error
+    );
+
+
+    process.exit(1);
+}); 
