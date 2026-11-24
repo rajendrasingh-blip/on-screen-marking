@@ -2,11 +2,12 @@
 import { getAllUserApi } from "@/api/apiCall";
 import UpdateRoleModal from "@/components/admin/UserRoleModel";
 import { usersStore } from "@/store/examStore";
+import { User } from "@/types/globalTypes";
 import { useEffect, useState, } from "react"
 
 const userManagement = () => {
     const [isOpen, setIsOpen] = useState(false);
-    const [selectedUser, setSelectedUser] = useState({});
+    const [selectedUser, setSelectedUser] = useState<User | null>(null);
 
     const users = usersStore((state) => state.users);
     console.log(users, 'users');
@@ -94,7 +95,7 @@ const userManagement = () => {
                     </tbody>
                 </table>
             </div>
-            {isOpen && <UpdateRoleModal
+            {isOpen && selectedUser && <UpdateRoleModal
                 onClose={setIsOpen}
                 selectedUser={selectedUser}
             />}

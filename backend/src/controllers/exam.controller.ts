@@ -108,7 +108,7 @@ export const createExam = async (
             },
 
             questions: questions.map((question: any) => ({
-                qNo: Number(question.qNo),
+                qNo: question.qNo,
                 subPart: question.subPart?.trim() || "",
                 title: question.title.trim(),
                 maxMarks: Number(question.maxMarks),

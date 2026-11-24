@@ -1,17 +1,22 @@
 "use client";
 
 import { updateRoleApi } from "@/api/apiCall";
+import { User } from "@/types/globalTypes";
 import { useState } from "react";
 
 const roles = [{ id: 1, role: "ADMIN" }, { id: 2, role: "EXAMINER" }, { id: 3, role: "STUDENT" }];
+interface UpdateRoleModalProps {
+    onClose: (value: boolean) => void;
+    selectedUser: User;
+}
 
-export default function UpdateRoleModal(props) {
+export default function UpdateRoleModal(props: UpdateRoleModalProps) {
     const { onClose, selectedUser } = props;
     const [selectedRole, setSelectedRole] = useState("STUDENT");
     const [isLoading, setIsLoading] = useState(false);
 
 
-    const handleSubmit = async (e) => {
+    const handleSubmit = async (e: React.FormEvent<HTMLFormElement>) => {
         e.preventDefault();
         setIsLoading(true);
         try {

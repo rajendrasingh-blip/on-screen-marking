@@ -104,7 +104,7 @@ async function seed() {
 
   console.log(
     "Exam created:",
-    exam._id.toString()
+    exam._id
   );
 
   process.exit(0);

@@ -4,7 +4,7 @@ import { IExam, IQuestion } from "../types/globalTypes";
 const questionSchema = new Schema<IQuestion>(
     {
         qNo: {
-            type: Number,
+            type: String,
             required: true
         },
         subPart: {

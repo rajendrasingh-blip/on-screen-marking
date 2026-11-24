@@ -120,7 +120,9 @@ export interface SavedMark {
 }
 
 export interface User {
+  _id: string,
   name: string,
   email: string,
-  role: RoleType
+  role: RoleType,
+  isActive: boolean
 }

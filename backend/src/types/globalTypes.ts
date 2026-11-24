@@ -1,5 +1,5 @@
 export interface IQuestion {
-    qNo: number;
+    qNo: string;
     subPart?: string;
     title: string;
     maxMarks: number;

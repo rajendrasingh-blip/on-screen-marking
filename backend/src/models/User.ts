@@ -7,7 +7,8 @@ export interface IUser extends Document {
     email: string,
     role: RoleType,
     password: string,
-    comparePassword(candidatePassword: string): Promise<boolean>;
+    comparePassword(candidatePassword: string): Promise<boolean>,
+    isActive: Boolean
 }
 
 const UserSchema = new Schema({
