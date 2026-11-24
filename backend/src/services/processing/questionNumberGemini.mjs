@@ -143,7 +143,7 @@ or:
 VALID QUESTION NUMBERS
 ===============================================================================
 
-Main question numbers are integers from 1 to 30.
+Main question numbers are integers from 1 to 150.
 
 A two-digit number such as 13 is ONE question number.
 
@@ -697,7 +697,7 @@ If no genuine question marker is visible:
             1;
 
         const MAX_QUESTION_NO =
-            30;
+            150;
 
 
         const VALID_MARKER_TYPES = [

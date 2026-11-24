@@ -7,7 +7,7 @@ import cookieParser from "cookie-parser";
 const app = express();
 
 app.use(cors({
-    origin: process.env.RONTEND_URL || "http://localhost:3000",
+    origin: process.env.RONTEND_URL || "http://osm.indiaresults.com/",
     credentials: true
 }))
 
