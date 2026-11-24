@@ -95,7 +95,7 @@ const userManagement = () => {
                     </tbody>
                 </table>
             </div>
-            {isOpen && selectedUser && <UpdateRoleModal
+            {(isOpen && selectedUser) && <UpdateRoleModal
                 onClose={setIsOpen}
                 selectedUser={selectedUser}
             />}
