@@ -2,7 +2,10 @@ import axios from "axios";
 
 const axiosBase = axios.create({
     baseURL: process.env.NEXT_PUBLIC_API_URL,
-    withCredentials: true
+    withCredentials: true,
+    headers: {
+        "Content-Type": "application/json"
+    }
 })
 
 export default axiosBase;

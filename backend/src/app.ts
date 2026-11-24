@@ -7,7 +7,7 @@ import cookieParser from "cookie-parser";
 const app = express();
 
 app.use(cors({
-    origin: process.env.RONTEND_URL || "http://osm.indiaresults.com/",
+    origin: process.env.RONTEND_URL || "https://osm.indiaresults.com",
     credentials: true
 }))
 
@@ -31,7 +31,9 @@ app.use(
         extended: true,
     })
 );
+
 app.use(cookieParser());
+
 app.get("/api/health", (_req, res) => { res.json({ sucess: true, message: "OSM API is running" }) });
 
 app.use(

@@ -59,7 +59,7 @@ export const login = async (req: Request, res: Response) => {
         if (!user.isActive) {
             return res.status(403).json({ success: false, message: "Your account is not active. Contact admin." })
         }
-        const isPasswordValid = bcrypt.compare(password, user.password);
+        const isPasswordValid = await bcrypt.compare(password, user.password);
 
         if (!isPasswordValid) {
             return res.status(401).json({ success: false, message: "invalid email or password" })
@@ -79,7 +79,7 @@ export const login = async (req: Request, res: Response) => {
 
         res.cookie("accessToken", token, {
             httpOnly: true,
-            secure: process.env.NODE_ENV === "production",
+            secure: true,
             sameSite: "lax",
             maxAge: 8 * 60 * 60 * 1000,
             path: "/"
@@ -111,7 +111,7 @@ export const currentUser = async (req: Request, res: Response) => {
         const secret = process?.env?.JWT_SECRET;
 
         if (!token) {
-            return res.status(401).json({ success: true, message: "Token missing, please login again." })
+            return res.status(401).json({ success: false, message: "Token missing, please login again." })
         }
         if (!secret) {
             throw new Error("JWT_SECRET is not configured.");
