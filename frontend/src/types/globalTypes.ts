@@ -107,6 +107,7 @@ export interface SelectedQuestion {
 }
 
 export interface SavedMark {
+  _id: string;
   pageNumber: number;
 
   qNo: string;
