@@ -45,7 +45,7 @@ const loadingTask =
         // --------------------------------
 
         wasmUrl:
-            "http://127.0.0.1:5000/pdfjs/wasm/",
+            "http://127.0.0.1:5001/pdfjs/wasm/",
 
         useWasm: true,
 

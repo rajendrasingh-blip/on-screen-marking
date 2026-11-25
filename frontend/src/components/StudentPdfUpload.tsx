@@ -26,7 +26,6 @@ export default function StudentPdfUpload() {
     getAllExamApi();
   }, [])
 
-
   async function handleUpload() {
     if (!studentId.trim()) {
       setMessage(
@@ -53,9 +52,8 @@ export default function StudentPdfUpload() {
           studentName,
           selectedExamId
         );
-
       setMessage(
-        `Uploaded successfully. PDF ID: ${result.data.pdfId}`
+        `Uploaded successfully. PDF ID: ${result.pdfId}`
       );
 
       setFile(null);

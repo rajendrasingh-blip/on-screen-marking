@@ -11,8 +11,6 @@ import { answerSheetStore, markStore } from "@/store/examStore";
 import { ExaminerData, SavedMark, SelectedQuestion } from "@/types/globalTypes";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.mjs";
-const API_URL = "http://localhost:5000";
-
 
 export default function ExaminerAnswerSheet() {
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -87,7 +85,7 @@ export default function ExaminerAnswerSheet() {
         "/pdf.worker.mjs";
 
       const pdfUrl =
-        `${API_URL}/api/student/answer-sheet/${answerId}/pdf`;
+        `${process.env.NEXT_PUBLIC_API_URL}/student/answer-sheet/${answerId}/pdf`;
 
       console.log("PDF URL:", pdfUrl);
 
@@ -697,7 +695,7 @@ export default function ExaminerAnswerSheet() {
                     : savedMark?.awardedMarks !== undefined
                       ? String(savedMark.awardedMarks)
                       : "";
-                      
+
                 const isCompleted = id
                   ? draftMarks[id] === value
                   : false;

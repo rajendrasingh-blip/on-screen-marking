@@ -2,7 +2,7 @@
 "use client";
 
 import Link from "next/link";
-import { usePathname, useRouter } from "next/navigation";
+import { usePathname } from "next/navigation";
 import {
     LayoutDashboard,
     GraduationCap,
@@ -47,7 +47,6 @@ export default function AdminSidebar({
 }: AdminSidebarProps) {
 
     const pathname = usePathname();
-    const router = useRouter();
 
     const handleLogout = async () => {
         try {
@@ -57,7 +56,7 @@ export default function AdminSidebar({
                 throw new Error("Logout failed");
             }
 
-            router.replace("/");
+            window.location.replace("/");
 
         } catch (error) {
             console.error(error);
