@@ -1,41 +1,99 @@
 import axiosBase from "./axios";
 import { examStore, markStore, usersStore } from "@/store/examStore";
 
+interface UploadAnswerSheetData {
+  examId: string;
+  board: string;
+  className: string;
+  subject: string;
+  stream?: string;
+}
+
+type SubQuestionItem = {
+  subPart: string;
+  title: string;
+  maxMarks: number;
+};
+
+type QuestionItem = {
+  qNo: number;
+  title: string;
+  maxMarks: number;
+  subQuestions: SubQuestionItem[];
+};
+
 export async function uploadStudentPdf(
   file: File,
-  studentId: string,
-  studentName: string,
-  examId: string
+  data: UploadAnswerSheetData
 ) {
   const formData = new FormData();
 
   formData.append("file", file);
-  formData.append(
-    "studentId",
-    studentId
-  );
-  formData.append(
-    "studentName",
-    studentName
-  );
-  formData.append(
-    "examId",
-    examId
-  );
+  formData.append("examId", data.examId);
+  formData.append("board", data.board);
+  formData.append("class", data.className);
+  formData.append("subject", data.subject);
 
-  const response = await axiosBase.post("/student/upload", formData);
-  if (response.data.success) {
-    const data = response.data.data;
-    return data;
+  if (data.stream) {
+    formData.append("stream", data.stream);
   }
 
+  const response = await axiosBase.post(
+    "/answer-sheet/upload",
+    formData
+  );
+
+  if (!response.data.success) {
+    throw new Error(
+      response.data.message || "Upload failed"
+    );
+  }
+
+  return response.data.data;
 }
+
+
+// Bulk PDF Upload
+export async function uploadBulkStudentPdf(
+  files: File[],
+  data: UploadAnswerSheetData
+) {
+  const formData = new FormData();
+
+  files.forEach((file) => {
+    formData.append("files", file);
+  });
+
+  formData.append("examId", data.examId);
+  formData.append("board", data.board);
+  formData.append("class", data.className);
+  formData.append("subject", data.subject);
+
+  if (data.stream) {
+    formData.append("stream", data.stream);
+  }
+
+  const response = await axiosBase.post(
+    "/answer-sheet/bulk-upload",
+    formData
+  );
+
+  if (!response.data.success) {
+    throw new Error(
+      response.data.message || "Bulk upload failed"
+    );
+  }
+
+  return response.data.data;
+}
+
 
 export const getAllExamApi = async () => {
   try {
-    const res = await axiosBase.get("/student/exam");
+    const res = await axiosBase.get("/exam/all");
     if (res.data.success) {
-      examStore.getState().setExam(res?.data.data)
+      examStore.getState().setExam(res?.data.data);
+      return res;
     }
   }
   catch (error) {
@@ -43,9 +101,9 @@ export const getAllExamApi = async () => {
   }
 }
 
-export const getCurrentAnswerSheetPdfApi = async (pdfId: string | null) => {
+export const getCurrentAnswerSheetApi = async (pdfId: string | null) => {
   try {
-    const res = await axiosBase.get(`/student/answer-sheet/${pdfId}`);
+    const res = await axiosBase.get(`/answer-sheet/${pdfId}`);
     if (res.data.success) {
       return res?.data;
     }
@@ -55,9 +113,10 @@ export const getCurrentAnswerSheetPdfApi = async (pdfId: string | null) => {
   }
 }
 
+
 export const saveMarkApi = async (param: any) => {
   try {
-    const res = await axiosBase.post("/student/mark", param);
+    const res = await axiosBase.post("/answer-sheet/mark", param);
     if (res.data.success) {
       getMarksApi({ answerSheetId: param.answerSheetId })
       return res?.data;
@@ -68,12 +127,16 @@ export const saveMarkApi = async (param: any) => {
   }
 }
 
-export const createExamApi = async (form: any) => {
+export const createExamApi = async (data: any) => {
   try {
-    await axiosBase.post(
-      "/student/create-exam",
-      form
+    const res = await axiosBase.post(
+      "/exam/create",
+      data
     );
+
+    if (res.success) {
+      return res;
+    }
 
   }
   catch (error) {
@@ -81,10 +144,18 @@ export const createExamApi = async (form: any) => {
   }
 }
 
+export const createExamQuestionsApi = (data: {
+  examId: string;
+  subject: string;
+  questions: QuestionItem[];
+}) => {
+  return axiosBase.post("/exam/questions-create", data);
+};
+
 export const studentAnswerSheetApi = async () => {
   try {
     const res = await axiosBase.get(
-      "/student/answerSheet"
+      "/answer-sheet/all"
     );
     if (res.data.success) {
       return res.data;
@@ -97,7 +168,8 @@ export const studentAnswerSheetApi = async () => {
 
 export const getMarksApi = async (param: any) => {
   try {
-    const res = await axiosBase.get("/student/allMark", { params: param });
+    const res = await axiosBase.get("/answer-sheet/allMark", { params: param });
+    console.log(res, 'resmark')
     if (res.data.success) {
       markStore.getState().setMarks(res?.data.data)
     }
@@ -110,7 +182,7 @@ export const getMarksApi = async (param: any) => {
 
 export const signupApi = async (param: any) => {
   try {
-    const res = await axiosBase.post("/auth/signup", param);
+    const res = await axiosBase.post("/user/signup", param);
     return res.data;
   }
   catch (error) {
@@ -121,7 +193,7 @@ export const signupApi = async (param: any) => {
 
 export const loginApi = async (param: any) => {
   try {
-    const res = await axiosBase.post("/auth/login", param);
+    const res = await axiosBase.post("/user/login", param);
     return res.data;
   }
   catch (error) {
@@ -132,7 +204,7 @@ export const loginApi = async (param: any) => {
 
 export const getCurrentUserApi = async () => {
   try {
-    const res = await axiosBase.get("/auth/currentUser");
+    const res = await axiosBase.get("/user/current");
     return res.data;
   }
   catch (error) {
@@ -142,7 +214,7 @@ export const getCurrentUserApi = async () => {
 
 export const logoutApi = async () => {
   try {
-    const res = await axiosBase.post("/auth/logout");
+    const res = await axiosBase.post("/user/logout");
     return res.data;
   }
   catch (error) {
@@ -152,7 +224,7 @@ export const logoutApi = async () => {
 
 export const getAllUserApi = async () => {
   try {
-    const res = await axiosBase.get("/auth/users");
+    const res = await axiosBase.get("/user/all");
     usersStore.getState().setUsers(res.data.data);
     return res.data;
   }
@@ -163,7 +235,7 @@ export const getAllUserApi = async () => {
 
 export const updateRoleApi = async (param: any) => {
   try {
-    const res = await axiosBase.post("/auth/updateRole", param);
+    const res = await axiosBase.post("/user/updateRole", param);
     getAllUserApi();
     return res.data;
   }

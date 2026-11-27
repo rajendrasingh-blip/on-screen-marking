@@ -1,18 +1,13 @@
-export interface IQuestion {
-    qNo: string;
-    subPart?: string;
-    title: string;
-    maxMarks: number;
-}
+
 
 export interface IExam extends Document {
     name: string;
-    subject: string;
+    board: string;
+    className: string,
+    stream: string,
+    subjects: string[],
     answerSheet: {
         width: number;
         height: number;
     };
-    questions: IQuestion[];
-    createdAt: Date;
-    updatedAt: Date;
 }

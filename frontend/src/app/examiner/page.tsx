@@ -6,9 +6,10 @@ import React, {
 } from "react";
 
 import * as pdfjsLib from "pdfjs-dist";
-import { studentAnswerSheetApi, getCurrentAnswerSheetPdfApi, saveMarkApi, getMarksApi } from "@/api/apiCall";
-import { answerSheetStore, markStore } from "@/store/examStore";
+import { studentAnswerSheetApi, getCurrentAnswerSheetApi, saveMarkApi, getMarksApi, logoutApi, getAllExamApi } from "@/api/apiCall";
+import { answerSheetStore, examStore, markStore } from "@/store/examStore";
 import { ExaminerData, SavedMark, SelectedQuestion } from "@/types/globalTypes";
+import { Check, ChevronLeft, ChevronRight, FileText, Loader2, LogOut } from "lucide-react";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = "/pdf.worker.mjs";
 
@@ -26,10 +27,71 @@ export default function ExaminerAnswerSheet() {
   const [rendering, setRendering] = useState(false);
   const [saving, setSaving] = useState(false);
   const [draftMarks, setDraftMarks] = useState<Record<string, string>>({});
+  const [pageInput, setPageInput] = useState("1");
 
   const answerId = answerSheetStore((state) => state.answerId);
   const setAnswerId = answerSheetStore((state) => state.setAnswerId);
   const allMarkData = markStore((state) => state.marks);
+  const examList = examStore((state) => state.exam)
+
+  // FILTER STATES
+  const [filterBoard, setFilterBoard] = useState("");
+  const [filterExam, setFilterExam] = useState("");
+  const [filterClass, setFilterClass] = useState("");
+  const [filterSubject, setFilterSubject] = useState("");
+
+  // Replace allExamData with your actual exam-list variable
+  // Expected exam structure: { _id, name }
+
+  // Only processed PDFs
+  const readyPdfs = (allPdfData || []).filter(
+    (item: any) => item.processingStatus === "ready"
+  );
+
+  // Dynamic filter options
+  const boardOptions = [...new Set(
+    readyPdfs.map((item: any) => item.board).filter(Boolean)
+  )];
+
+  const examOptions = examList.filter((exam: any) =>
+    readyPdfs.some(
+      (pdf: any) =>
+        String(pdf.examId) === String(exam._id) &&
+        (!filterBoard || pdf.board === filterBoard)
+    )
+  );
+
+  const classOptions = [...new Set(
+    readyPdfs
+      .filter((pdf: any) =>
+        (!filterBoard || pdf.board === filterBoard) &&
+        (!filterExam || String(pdf.examId) === filterExam)
+      )
+      .map((pdf: any) => pdf.className)
+      .filter(Boolean)
+  )];
+
+  const subjectOptions = [...new Set(
+    readyPdfs
+      .filter((pdf: any) =>
+        (!filterBoard || pdf.board === filterBoard) &&
+        (!filterExam || String(pdf.examId) === filterExam) &&
+        (!filterClass || pdf.className === filterClass)
+      )
+      .map((pdf: any) => pdf.subject)
+      .filter(Boolean)
+  )];
+
+  const filteredPdfs = readyPdfs.filter((pdf: any) =>
+    (!filterBoard || pdf.board === filterBoard) &&
+    (!filterExam || String(pdf.examId) === filterExam) &&
+    (!filterClass || pdf.className === filterClass) &&
+    (!filterSubject || pdf.subject === filterSubject)
+  );
+
+  useEffect(() => {
+    getAllExamApi();
+  }, [])
 
   useEffect(() => {
     if (answerId) {
@@ -40,6 +102,22 @@ export default function ExaminerAnswerSheet() {
     fetchAnswerSheetData();
 
   }, [answerId]);
+
+  useEffect(() => {
+    setPageInput(String(currentPage));
+  }, [currentPage]);
+
+  const goToPage = () => {
+    const page = Number(pageInput);
+    const totalPages = data?.answerSheet.totalPages || 1;
+
+    if (!Number.isInteger(page) || page < 1 || page > totalPages) {
+      alert(`Please enter page number between 1 and ${totalPages}`);
+      return;
+    }
+
+    setCurrentPage(page);
+  };
 
   const getAllMarkData = () => {
     getMarksApi({ answerSheetId: answerId })
@@ -55,7 +133,7 @@ export default function ExaminerAnswerSheet() {
     async () => {
       try {
         setLoading(true);
-        const pdfData = await getCurrentAnswerSheetPdfApi(answerId);
+        const pdfData = await getCurrentAnswerSheetApi(answerId);
         setData(pdfData);
       } catch (error) {
         console.error(
@@ -85,7 +163,7 @@ export default function ExaminerAnswerSheet() {
         "/pdf.worker.mjs";
 
       const pdfUrl =
-        `${process.env.NEXT_PUBLIC_API_URL}/student/answer-sheet/${answerId}/pdf`;
+        `${process.env.NEXT_PUBLIC_API_URL}/answer-sheet/${answerId}/pdf`;
 
       console.log("PDF URL:", pdfUrl);
 
@@ -543,140 +621,210 @@ export default function ExaminerAnswerSheet() {
     setAnswerId(e.target.value)
   }
 
+  const handleLogout = async () => {
+    try {
+      const response = await logoutApi();
+
+      if (!response.success) {
+        throw new Error("Logout failed");
+      }
+
+      window.location.replace("/");
+
+    } catch (error) {
+      console.error(error);
+    }
+  };
+
   /* ==================================================
      UI
   ================================================== */
 
+
+  const examDropdownOptions = examList.length
+    ? examOptions
+    : [...new Map(
+      readyPdfs
+        .filter((pdf: any) =>
+          !filterBoard || pdf.board === filterBoard
+        )
+        .map((pdf: any) => [
+          String(pdf.examId),
+          { _id: String(pdf.examId), name: `Exam ${String(pdf.examId).slice(-5)}` }
+        ])
+    ).values()];
+
   return (
-    <div
-      style={{
-        width: "100%",
-        height: "100vh",
-        background: "#eee",
-        display: "flex",
-        flexDirection:
-          "column",
-      }}
-    >
+    <div className="h-screen w-full flex flex-col overflow-hidden bg-slate-100">
 
-      {/* HEADER */}
-      <div
-        style={{
-          height: 60,
-          background: "#fff",
-          borderBottom:
-            "1px solid #ddd",
+      {/* ================= HEADER ================= */}
+      <header className="h-[68px] shrink-0 bg-slate-900 text-white px-6 flex items-center justify-between shadow-md">
 
-          display: "flex",
-          alignItems: "center",
+        <div className="flex items-center gap-3">
+          <div className="h-10 w-10 rounded-xl bg-blue-600 flex items-center justify-center">
+            <FileText size={22} />
+          </div>
 
-          padding:
-            "0 20px",
+          <div>
+            <h1 className="text-lg font-bold tracking-wide">
+              On-Screen Marking
+            </h1>
+            <p className="text-xs text-slate-400">
+              Examiner Evaluation Workspace
+            </p>
+          </div>
+        </div>
 
-          gap: 25,
-        }}
-      >
-        {data && <>
-          <strong>
-            {data && data.exam.name}
-          </strong>
+        <div className="flex items-center gap-5">
 
-          <span>
-            {data && data.exam.subject}
-          </span>
-
-          <span>
-            {data && data.answerSheet
-              .originalFileName}
-          </span>
-
-          <span>
-            Page{" "}
-            {currentPage} /{" "}
-            {
-              data && data.answerSheet
-                .totalPages
-            }
-          </span>
-
-        </>}
-
-
-        <select
-          onChange={onChangeAnswerSheet}
-          className="w-full max-w-md rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm text-gray-700 shadow-sm outline-none transition focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-        >
-          <option value="">Select Answer Sheet</option>
-
-          {allPdfData?.map((item: any) => (
-            <option key={item._id} value={item._id}>
-              {item.originalFileName}
-            </option>
-          ))}
-        </select>
-      </div>
-
-      <div
-        style={{
-          flex: 1,
-          display: "flex",
-          width: "100%",
-          minHeight: 0,
-          overflow: "hidden",
-          gap: 0,
-        }}
-      >
-        {/* LEFT SECTION - 30% */}
-        <div
-          style={{
-            flex: "0 0 30%",
-            width: "30%",
-            minWidth: 0,
-            background: "#fff",
-            borderRight: "1px solid #ddd",
-            display: "flex",
-            flexDirection: "column",
-            overflow: "hidden",
-          }}
-        >
-          {/* LEFT HEADER */}
-          <div className="p-4 border-b bg-gray-50">
-            <div className="flex justify-between items-center">
-              <h2 className="font-bold text-gray-800 text-base">
-                Question Marking
-              </h2>
-
-              <span className="text-xs bg-blue-100 text-blue-700 px-2 py-1 rounded-full">
-                {data?.exam.questions.length || 0} Questions
-              </span>
-            </div>
-
-            <p className="text-xs text-gray-500 mt-1">
-              Enter marks for each question
+          <div className="text-right">
+            <p className="text-sm font-semibold">
+              {data?.exam?.name || "Select Examination"}
+            </p>
+            <p className="text-xs text-slate-400">
+              {data?.exam?.subject || "Subject not selected"}
             </p>
           </div>
 
-          {/* QUESTION BOXES */}
+          <div className="h-8 w-px bg-slate-700" />
+        </div>
+      </header>
 
-          <div
-            style={{
-              flex: 1,
-              overflowY: "auto",
-              padding: 14,
-            }}
-          >
+
+      {/* ================= FILTER SECTION ================= */}
+      <div className="shrink-0 bg-white border-b border-slate-200 px-5 py-4 shadow-sm">
+        <div className="grid grid-cols-5 gap-3">
+          {/* EXAM */}
+          <div>
+            <select
+              value={filterExam}
+              onChange={(e) => {
+                setFilterExam(e.target.value);
+                setFilterClass("");
+                setFilterSubject("");
+              }}
+              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            >
+              <option value="">All Examinations</option>
+
+              {examDropdownOptions.map((exam: any) => (
+                <option key={exam._id} value={exam._id}>
+                  {exam.name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+
+          {/* CLASS */}
+          <div>
+            <select
+              value={filterClass}
+              onChange={(e) => {
+                setFilterClass(e.target.value);
+                setFilterSubject("");
+              }}
+              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            >
+              <option value="">All Classes</option>
+
+              {classOptions.map((cls: any) => (
+                <option key={cls} value={cls}>
+                  Class {cls}
+                </option>
+              ))}
+            </select>
+          </div>
+
+
+          {/* SUBJECT */}
+          <div>
+            <select
+              value={filterSubject}
+              onChange={(e) => setFilterSubject(e.target.value)}
+              className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2.5 text-sm outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            >
+              <option value="">All Subjects</option>
+
+              {subjectOptions.map((subject: any) => (
+                <option key={subject} value={subject}>
+                  {subject}
+                </option>
+              ))}
+            </select>
+          </div>
+
+
+          {/* ANSWER SHEET */}
+          <div>
+            <select
+              onChange={onChangeAnswerSheet}
+              defaultValue=""
+              className="w-full rounded-lg border border-blue-300 bg-blue-50 px-3 py-2.5 text-sm font-medium text-blue-800 outline-none focus:ring-2 focus:ring-blue-100"
+            >
+              <option value="">Select PDF</option>
+
+              {filteredPdfs.map((item: any) => (
+                <option key={item._id} value={item._id}>
+                  {item.originalFileName}
+                </option>
+              ))}
+            </select>
+          </div>
+
+        </div>
+
+      </div>
+
+
+      {/* ================= MAIN WORKSPACE ================= */}
+      <div className="flex flex-1 min-h-0 w-full overflow-hidden">
+
+        {/* ================= LEFT 30% ================= */}
+        <div className="w-[30%] shrink-0 min-w-0 flex flex-col bg-white border-r border-slate-200">
+
+          {/* LEFT HEADER */}
+          <div className="px-4 py-4 border-b bg-slate-50">
+
+            <div className="flex items-center justify-between">
+
+              <div>
+                <h2 className="font-bold text-slate-800 text-base">
+                  Question Marking
+                </h2>
+
+                <p className="text-xs text-slate-500 mt-1">
+                  Enter marks for each question
+                </p>
+              </div>
+
+              <span className="text-xs font-semibold bg-blue-100 text-blue-700 px-3 py-1.5 rounded-full">
+                {data?.exam?.questions?.length || 0} Questions
+              </span>
+
+            </div>
+
+          </div>
+
+
+          {/* QUESTION BOXES */}
+          <div className="flex-1 min-h-0 overflow-y-auto p-4">
+
             <div
               className="grid gap-3"
               style={{
-                gridTemplateColumns: "repeat(auto-fill, minmax(105px, 1fr))",
+                gridTemplateColumns: "repeat(auto-fill, minmax(105px, 1fr))"
               }}
             >
-              {data?.exam.questions.map((q: any, idx: number) => {
+
+              {data?.exam?.questions?.map((q: any, idx: number) => {
+
                 const key = `${q.qNo}-${q.subPart || ""}-${idx}`;
 
                 const maxMarks = Number(q.maxMarks || 0);
 
                 const savedMark = allMarkData.find((item) => {
+
                   const sameQuestion =
                     String(item.qNo) === String(q.qNo);
 
@@ -704,19 +852,21 @@ export default function ExaminerAnswerSheet() {
                   <div
                     key={key}
                     className={`
-            group relative rounded-xl border p-3
-            transition-all duration-200
-            hover:-translate-y-0.5 hover:shadow-md
-            ${isCompleted
+                    group relative rounded-xl border p-3
+                    transition-all duration-200
+                    hover:-translate-y-0.5 hover:shadow-md
+                    ${isCompleted
                         ? "border-emerald-200 bg-emerald-50/70 hover:border-emerald-400"
                         : "border-orange-200 bg-orange-50/70 hover:border-orange-400"
                       }
-          `}
+                  `}
                   >
-                    {/* STATUS INDICATOR */}
+
                     <div className="flex items-center justify-between mb-3">
+
                       <span className="text-sm font-bold text-gray-800">
                         Q {q.qNo}
+
                         {q.subPart && (
                           <span className="text-gray-500 font-medium">
                             {" "}({q.subPart})
@@ -726,31 +876,21 @@ export default function ExaminerAnswerSheet() {
 
                       {isCompleted ? (
                         <span className="flex items-center justify-center w-5 h-5 rounded-full bg-emerald-500 text-white">
-                          <svg
-                            className="w-3 h-3"
-                            fill="none"
-                            stroke="currentColor"
-                            strokeWidth="2.5"
-                            viewBox="0 0 24 24"
-                          >
-                            <path
-                              strokeLinecap="round"
-                              strokeLinejoin="round"
-                              d="m5 12 4 4L19 6"
-                            />
-                          </svg>
+                          <Check size={13} />
                         </span>
                       ) : (
                         <span className="w-2 h-2 rounded-full bg-orange-500" />
                       )}
+
                     </div>
 
-                    {/* MARKS INPUT */}
+
                     <input
                       type="text"
                       inputMode="decimal"
                       value={value}
                       onChange={(e) => {
+
                         const val = e.target.value;
 
                         if (val !== "" && !/^\d*\.?\d*$/.test(val)) {
@@ -763,20 +903,16 @@ export default function ExaminerAnswerSheet() {
 
                         finalSaveMark(val, savedMark);
                       }}
-                      className={`
-              w-full text-center rounded-lg border
-              bg-white py-2.5 text-lg font-bold
-              outline-none transition-all
-              ${isCompleted
-                          ? "border-emerald-200 text-emerald-700 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
-                          : "border-orange-200 text-orange-700 focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
-                        }
-            `}
+                      className={`w-full text-center rounded-lg border bg-white py-2.5 text-lg font-bold outline-none transition-all ${isCompleted
+                        ? "border-emerald-200 text-emerald-700 focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100"
+                        : "border-orange-200 text-orange-700 focus:border-orange-500 focus:ring-2 focus:ring-orange-100"
+                        }`}
                       placeholder="0"
                     />
 
-                    {/* MAX MARKS */}
+
                     <div className="flex items-center justify-between mt-2">
+
                       <span className="text-[10px] font-medium text-gray-500">
                         MAX: {maxMarks}
                       </span>
@@ -789,64 +925,59 @@ export default function ExaminerAnswerSheet() {
                       >
                         {isCompleted ? "Completed" : "Pending"}
                       </span>
+
                     </div>
+
                   </div>
                 );
               })}
+
             </div>
+
           </div>
 
+          <div className="h-16 shrink-0 border-t border-gray-200 bg-white px-4 flex items-center justify-center gap-2">
+            <button
+              onClick={handleLogout}
+              className="mr-auto flex cursor-pointer shrink-0 items-center gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-2 text-sm font-medium text-red-600 transition hover:border-red-300 hover:bg-red-100 active:scale-95"
+            >
+              <LogOut size={18} />
+              Logout
+            </button>
+          </div>
         </div>
-        <div
-          style={{
-            flex: "0 0 70%",
-            width: "70%",
-            minWidth: 0,
-            overflow: "auto",
-            padding: 20,
-            display: "flex",
-            justifyContent: "center",
-            alignItems: "flex-start",
-            background: "#eee",
-          }}
-        >
-          <div
-            ref={
-              pageContainerRef
-            }
-            // onContextMenu={
-            //   handleContextMenu
-            // }
-            style={{
-              position: "relative",
-              width: canvasRef.current?.getBoundingClientRect().width,
-              height: canvasRef.current?.getBoundingClientRect().height,
-              display: "inline-block",
-              background: "#fff",
-              boxShadow: "0 2px 10px rgba(0,0,0,.2)",
-              lineHeight: 0,
-            }}
-          >
-            <canvas
-              ref={canvasRef}
-              onContextMenu={handleContextMenu}
-            />
 
-            {/* SAVED MARKS */}
 
-            {allMarkData
-              .filter(
-                (mark) =>
-                  mark.pageNumber ===
-                  currentPage
-              )
-              .map(
-                (mark) => {
-                  if (
-                    !currentPageData
-                  ) {
-                    return null;
-                  }
+        {/* ================= RIGHT 70% PDF SECTION ================= */}
+        <div className="w-[70%] min-w-0 flex flex-col bg-slate-200">
+          {/* PDF CANVAS AREA */}
+          <div className="flex-1 min-h-0 overflow-auto p-5 flex justify-center items-start">
+
+            <div
+              ref={pageContainerRef}
+              style={{
+                position: "relative",
+                width: canvasRef.current?.getBoundingClientRect().width,
+                height: canvasRef.current?.getBoundingClientRect().height,
+                display: "inline-block",
+                background: "#fff",
+                boxShadow: "0 2px 10px rgba(0,0,0,.2)",
+                lineHeight: 0,
+              }}
+            >
+
+              <canvas
+                ref={canvasRef}
+                onContextMenu={handleContextMenu}
+              />
+
+
+              {/* SAVED MARKS */}
+              {allMarkData
+                .filter((mark) => mark.pageNumber === currentPage)
+                .map((mark) => {
+
+                  if (!currentPageData) return null;
 
                   const canvas = canvasRef.current;
 
@@ -855,288 +986,165 @@ export default function ExaminerAnswerSheet() {
                   const rect = canvas.getBoundingClientRect();
 
                   const left =
-                    (mark.x / currentPageData.width) *
-                    rect.width;
+                    (mark.x / currentPageData.width) * rect.width;
 
                   const top =
-                    (mark.y / currentPageData.height) *
-                    rect.height;
-
-                  console.log("MARK POSITION", {
-                    qNo: mark.qNo,
-                    subPart: mark.subPart,
-
-                    original: {
-                      x: mark.x,
-                      y: mark.y,
-                    },
-
-                    page: {
-                      width: currentPageData.width,
-                      height: currentPageData.height,
-                    },
-
-                    rendered: {
-                      width: rect.width,
-                      height: rect.height,
-                    },
-
-                    screen: {
-                      left,
-                      top,
-                    },
-                  });
+                    (mark.y / currentPageData.height) * rect.height;
 
                   return (
                     <div
                       key={`${mark.qNo}-${mark.subPart}`}
                       style={{
                         position: "absolute",
-
                         left: `${left}px`,
                         top: `${top}px`,
-
                         transform: "translate(-50%, -50%)",
-
                         background: "#fff",
                         border: "2px solid red",
                         borderRadius: 5,
                         padding: "10px 28px",
-
                         fontSize: 14,
                         fontWeight: 700,
                         color: "red",
-
                         zIndex: 10,
                         pointerEvents: "none",
                       }}
                     >
-                      {mark.awardedMarks}/
-                      {mark.maxMarks}
+                      {mark.awardedMarks}/{mark.maxMarks}
                     </div>
                   );
-                }
-              )}
+                })}
+
+            </div>
+
           </div>
-        </div>
-      </div>
 
-      {/* FOOTER */}
 
-      <div
-        style={{
-          height: 60,
-
-          background:
-            "#fff",
-
-          borderTop:
-            "1px solid #ddd",
-
-          display: "flex",
-
-          alignItems:
-            "center",
-
-          justifyContent:
-            "center",
-
-          gap: 20,
-        }}
-      >
-        <button
-          disabled={
-            currentPage <= 1
-          }
-          onClick={() =>
-            setCurrentPage(
-              (page) =>
-                page - 1
-            )
-          }
-        >
-          Previous
-        </button>
-
-        <span>
-          Page {currentPage}
-        </span>
-
-        <button
-          disabled={
-            currentPage >=
-            ((data && data.answerSheet
-              .totalPages) ?? 1)
-          }
-          onClick={() =>
-            setCurrentPage(
-              (page) =>
-                page + 1
-            )
-          }
-        >
-          Next
-        </button>
-      </div>
-
-      {/* MARK POPUP */}
-
-      {
-        selectedQuestion && (
-          <div
-            style={{
-              position:
-                "fixed",
-
-              left:
-                selectedQuestion.screenX,
-
-              top:
-                selectedQuestion.screenY,
-
-              transform:
-                "translateY(5px)",
-
-              background:
-                "#fff",
-
-              border:
-                "1px solid #ccc",
-
-              borderRadius:
-                8,
-
-              boxShadow:
-                "0 5px 25px rgba(0,0,0,.25)",
-
-              padding:
-                15,
-
-              zIndex: 1000,
-
-              minWidth: 230,
-            }}
-          >
-            <div
-              style={{
-                fontWeight: 700,
-
-                fontSize: 16,
-
-                marginBottom: 5,
-              }}
-            >
-              Question{" "}
-              {
-                selectedQuestion.qNo
-              }
-
-              {selectedQuestion.subPart !==
-                "main" &&
-                ` (${selectedQuestion.subPart})`}
-            </div>
-
-            <div
-              style={{
-                color: "#555",
-
-                marginBottom: 12,
-              }}
-            >
-              Maximum Marks:{" "}
-              <strong>
-                {
-                  selectedQuestion.maxMarks
-                }
-              </strong>
-            </div>
-
-            <div
-              style={{
-                display: "flex",
-                flexWrap:
-                  "wrap",
-                gap: 6,
-              }}
-            >
-              {Array.from(
-                {
-                  length:
-                    selectedQuestion.maxMarks +
-                    1,
-                },
-                (_, mark) => (
-                  <button
-                    key={mark}
-                    disabled={saving}
-                    onClick={() =>
-                      saveMark(
-                        mark
-                      )
-                    }
-                    style={{
-                      minWidth:
-                        35,
-
-                      height:
-                        35,
-
-                      cursor:
-                        "pointer",
-                    }}
-                  >
-                    {mark}
-                  </button>
-                )
-              )}
-            </div>
+          {/* ================= PDF PAGINATION ================= */}
+          <div className="h-16 shrink-0 border-t border-slate-200 bg-white px-4 flex items-center justify-center gap-3">
 
             <button
-              onClick={() =>
-                setSelectedQuestion(
-                  null
-                )
-              }
-              style={{
-                width: "100%",
-
-                marginTop: 12,
-              }}
+              disabled={currentPage <= 1}
+              onClick={() => setCurrentPage((p) => p - 1)}
+              className="flex items-center gap-2 rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 disabled:opacity-40 hover:bg-slate-100 transition"
             >
-              Cancel
+              <ChevronLeft size={16} />
+              Previous
             </button>
+
+
+            <div className="flex items-center gap-1 overflow-x-auto max-w-[60%]">
+
+              {Array.from(
+                { length: data?.answerSheet?.totalPages || 1 },
+                (_, i) => i + 1
+              )
+                .filter(
+                  (page) =>
+                    page >= currentPage - 2 &&
+                    page <= currentPage + 2
+                )
+                .map((page) => (
+                  <button
+                    key={page}
+                    onClick={() => setCurrentPage(page)}
+                    className={`min-w-9 h-9 rounded-lg border text-sm font-semibold transition ${currentPage === page
+                      ? "bg-blue-600 text-white border-blue-600 shadow-sm"
+                      : "bg-white text-slate-700 border-slate-200 hover:bg-blue-50"
+                      }`}
+                  >
+                    {page}
+                  </button>
+                ))}
+
+            </div>
+
+
+            <button
+              disabled={
+                currentPage >= (data?.answerSheet?.totalPages || 1)
+              }
+              onClick={() => setCurrentPage((p) => p + 1)}
+              className="flex items-center gap-2 rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 disabled:opacity-40 hover:bg-slate-100 transition"
+            >
+              Next
+              <ChevronRight size={16} />
+            </button>
+
           </div>
-        )
-      }
 
-      {
-        rendering && (
-          <div
-            style={{
-              position:
-                "fixed",
+        </div>
 
-              right: 20,
+      </div>
 
-              top: 75,
 
-              background:
-                "#fff",
+      {/* ================= MARK POPUP ================= */}
+      {selectedQuestion && (
+        <div
+          style={{
+            position: "fixed",
+            left: selectedQuestion.screenX,
+            top: selectedQuestion.screenY,
+            transform: "translateY(5px)",
+            background: "#fff",
+            border: "1px solid #ccc",
+            borderRadius: 8,
+            boxShadow: "0 5px 25px rgba(0,0,0,.25)",
+            padding: 15,
+            zIndex: 1000,
+            minWidth: 230,
+          }}
+        >
 
-              padding:
-                "8px 12px",
+          <div className="font-bold text-base mb-2">
+            Question {selectedQuestion.qNo}
 
-              borderRadius: 5,
+            {selectedQuestion.subPart !== "main" &&
+              ` (${selectedQuestion.subPart})`}
+          </div>
 
-              boxShadow:
-                "0 2px 8px rgba(0,0,0,.15)",
-            }}
+          <div className="text-sm text-slate-600 mb-3">
+            Maximum Marks:{" "}
+            <strong>{selectedQuestion.maxMarks}</strong>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+
+            {Array.from(
+              { length: selectedQuestion.maxMarks + 1 },
+              (_, mark) => (
+                <button
+                  key={mark}
+                  disabled={saving}
+                  onClick={() => saveMark(mark)}
+                  className="min-w-9 h-9 rounded-md border border-slate-300 text-sm font-semibold hover:bg-blue-600 hover:text-white hover:border-blue-600 disabled:opacity-50 transition"
+                >
+                  {mark}
+                </button>
+              )
+            )}
+
+          </div>
+
+          <button
+            onClick={() => setSelectedQuestion(null)}
+            className="w-full mt-3 rounded-lg border border-slate-300 py-2 text-sm hover:bg-slate-100"
           >
-            Loading page...
-          </div>
-        )
-      }
+            Cancel
+          </button>
 
-    </div >
+        </div>
+      )}
+
+
+      {/* ================= LOADING ================= */}
+      {rendering && (
+        <div className="fixed right-5 top-20 bg-white px-4 py-3 rounded-lg shadow-lg text-sm font-medium text-slate-700 z-50 flex items-center gap-2">
+          <Loader2 size={16} className="animate-spin text-blue-600" />
+          Loading PDF page...
+        </div>
+      )}
+
+    </div>
   );
 }

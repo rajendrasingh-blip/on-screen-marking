@@ -6,7 +6,6 @@ import { Job } from "bullmq";
 import { StudentAnswerSheet } from "../../models/StudentAnswerSheet";
 import { CoordinateMap } from "../../models/CoordinateMap";
 import { Exam } from "../../models/Exam";
-import { Student } from "../../models/Student";
 
 interface ProcessingJobData {
     answerSheetId: string;
@@ -827,26 +826,6 @@ export async function processAnswerSheet(
             `Exam not found: ${jobData.examId}`
         );
     }
-    const student = await Student.findById(jobData.studentId);
-
-    if (!student) {
-        throw new Error(
-            `Student not found: ${jobData.studentId}`
-        );
-    }
-
-    if (
-        !Array.isArray(exam.questions) ||
-        exam.questions.length === 0
-    ) {
-        throw new Error(
-            "Exam does not contain questions"
-        );
-    }
-
-    console.log(
-        `Exam questions: ${exam.questions.length}`
-    );
 
     /* ---------------------------------------------------
        PDF PATH
@@ -1171,8 +1150,6 @@ export async function processAnswerSheet(
             {
                 studentId:
                     jobData.studentId,
-                studentName:
-                    student.name,
 
                 examId:
                     jobData.examId,

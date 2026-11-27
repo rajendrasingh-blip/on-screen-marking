@@ -1,54 +1,53 @@
-import mongoose, { Schema } from "mongoose";
-import { IExam, IQuestion } from "../types/globalTypes";
 
-const questionSchema = new Schema<IQuestion>(
+import mongoose, { Schema } from "mongoose";
+import { IExam } from "../types/globalTypes";
+
+const examSchema = new Schema<IExam>(
     {
-        qNo: {
+        name: {
             type: String,
-            required: true
-        },
-        subPart: {
-            type: String,
-            default: ""
-        },
-        title: {
-            type: String,
-            required: true
-        },
-        maxMarks: {
-            type: Number,
             required: true,
-            min: 0
-        }
+            trim: true,
+        },
+        board: {
+            type: String,
+            required: true,
+            trim: true,
+        },
+        className: {
+            type: String,
+            required: true,
+            trim: true,
+        },
+        stream: {
+            type: String,
+            default: "",
+            trim: true,
+        },
+        subjects: {
+            type: [String],
+            required: true,
+            validate: {
+                validator: (value: string[]) => value.length > 0,
+                message: "At least one subject is required",
+            },
+        },
+        answerSheet: {
+            width: {
+                type: Number,
+                required: true,
+                min: 1,
+            },
+            height: {
+                type: Number,
+                required: true,
+                min: 1,
+            },
+        },
     },
     {
-        _id: false
+        timestamps: true,
     }
 );
-
-const examSchema = new Schema<IExam>({
-    name: {
-        type: String,
-        required: true,
-    },
-    subject: {
-        type: String,
-        required: true
-    },
-    answerSheet: {
-        width: {
-            type: Number,
-            required: true
-        },
-        height: {
-            type: Number,
-            required: true
-        }
-    },
-    questions: {
-        type: [questionSchema],
-        required: true
-    }
-}, { timestamps: true });
 
 export const Exam = mongoose.model<IExam>("Exam", examSchema);

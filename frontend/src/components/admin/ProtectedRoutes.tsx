@@ -17,27 +17,32 @@ const ProtectedRoutes = ({ children, allowRoutes }: Props) => {
     useEffect(() => {
 
         checkUserRole();
-    }, [router, allowRoutes]);
+    }, []);
+
 
     const checkUserRole = async () => {
         try {
             setLoading(true);
+
             const currentUser = await getCurrentUserApi();
-            console.log(currentUser,'currentUser')
+
             if (allowRoutes.includes(currentUser?.data?.role)) {
-                router.push("/admin/dashboard");
                 setAuthorized(true);
             } else {
-                router.push("/");
+                setAuthorized(false);
+                router.replace("/");
             }
         }
         catch (error) {
             console.error(error, "failed api call get current user");
+            setAuthorized(false);
+            router.replace("/");
         }
         finally {
             setLoading(false);
         }
-    }
+    };
+
 
     if (loading) {
         return <div className="p-5">Checking authentication...</div>;

@@ -1,4 +1,4 @@
-import StudentPdfUpload from "@/components/StudentPdfUpload";
+import StudentPdfUpload from "@/components/admin/StudentPdfUpload";
 
 export default function UploadPage() {
   return (

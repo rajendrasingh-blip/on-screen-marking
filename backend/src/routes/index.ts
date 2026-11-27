@@ -1,11 +1,12 @@
 import { Router } from "express";
-import studentRoute from "./student.routes";
-import authRoute from "./auth.routes";
+import answerSheetRoute from "./answerSheet.routes";
+import userRoute from "./user.routes";
+import examRoute from "./exam.routes";
 
 const router = Router();
 
-router.use("/student", studentRoute);
-router.use("/auth", authRoute);
-
+router.use("/answer-sheet", answerSheetRoute);
+router.use("/user", userRoute);
+router.use("/exam", examRoute);
 
 export default router;

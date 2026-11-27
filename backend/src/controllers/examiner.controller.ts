@@ -62,7 +62,6 @@ export const getExaminerAnswerSheet = async (
 
       answerSheet: {
         id: answerSheet._id,
-        studentId: answerSheet.studentId,
         examId: answerSheet.examId,
 
         pdfId: answerSheet.pdfId,
@@ -82,9 +81,8 @@ export const getExaminerAnswerSheet = async (
       exam: {
         id: exam._id,
         name: exam.name,
-        subject: exam.subject,
+        subject: exam.subjects,
 
-        questions: exam.questions,
       },
 
       coordinateMap: {
@@ -240,9 +238,6 @@ export const saveExaminerMark = async (
           examId:
             answerSheet.examId,
 
-          studentId:
-            answerSheet.studentId,
-
           pageNumber:
             Number(pageNumber),
 
@@ -381,17 +376,19 @@ export const getAnsweredQuestionData = async (
 ) => {
   try {
     const { answerSheetId } = req.query;
-
+  
     if (!answerSheetId) {
       return res.status(400).json({
         success: false,
         message: "answerSheetId is required",
       });
     }
+
     if (
       typeof answerSheetId !== "string" ||
       !mongoose.Types.ObjectId.isValid(answerSheetId)
     ) {
+      
       return res.status(400).json({
         success: false,
         message: "Invalid answerSheetId",
@@ -400,11 +397,11 @@ export const getAnsweredQuestionData = async (
 
     const saved = await ExaminerMark.find({
       answerSheetId: new mongoose.Types.ObjectId(answerSheetId)
-   } ).sort({
-        pageNumber: 1,
-        qNo: 1,
-      });
-
+    }).sort({
+      pageNumber: 1,
+      qNo: 1,
+    });
+    
     return res.status(200).json({
       success: true,
       data: saved,
@@ -422,42 +419,3 @@ export const getAnsweredQuestionData = async (
     });
   }
 };
-
-// export const getAllReadyStatusAnswerSheetPdfIds = async (
-//   req: Request,
-//   res: Response
-// ) => {
-//   try {
-//     const coordinateMaps = await CoordinateMap.find({})
-//       .select("_id studentName studentId")
-//       .sort({ createdAt: -1 })
-//       .lean();
-
-//     if (coordinateMaps.length === 0) {
-//       return res.status(404).json({
-//         success: false,
-//         message: "No mapped answer sheet found",
-//         data: [],
-//       });
-//     }
-
-//     const data = coordinateMaps.map((item) => ({
-//       id: item._id,
-//       studentName: item.studentName,
-//       studentId: item.studentId,
-//     }));
-
-//     return res.status(200).json({
-//       success: true,
-//       message: "Mapped PDF IDs fetched successfully",
-//       data,
-//     });
-//   } catch (error) {
-//     console.log("Failed to fetch mapped PDF IDs", error);
-
-//     return res.status(500).json({
-//       success: false,
-//       message: "Failed to fetch mapped PDF IDs",
-//     });
-//   }
-// };

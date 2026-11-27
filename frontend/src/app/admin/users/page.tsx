@@ -79,7 +79,7 @@ const userManagement = () => {
                                         onClick={() => handleEdit(user)}
                                         className="px-3 py-2 cursor-pointer text-blue-600 border border-blue-200 rounded-lg hover:bg-blue-50"
                                     >
-                                        Edit
+                                        Update Role
                                     </button>
                                 </td>
                             </tr>

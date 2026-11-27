@@ -5,9 +5,9 @@ const router = Router();
 
 router.post("/signup", signup);
 router.post("/login", login);
-router.get("/currentUser", currentUser);
+router.get("/current", currentUser);
 router.post("/logout", logout);
-router.get("/users", getAllUser);
+router.get("/all", getAllUser);
 router.post("/updateRole", updateUserRole);
 
 

@@ -25,13 +25,13 @@ const menuItems = [
         icon: LayoutDashboard
     },
     {
-        name: "Students",
-        href: "/admin/answerSheet",
+        name: "Answer Sheet",
+        href: "/admin/answer-sheet",
         icon: GraduationCap
     },
     {
         name: "Exams",
-        href: "/admin/createExam",
+        href: "/admin/exam-create",
         icon: FileText
     },
     {

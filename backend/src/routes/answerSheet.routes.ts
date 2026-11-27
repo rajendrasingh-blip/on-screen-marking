@@ -4,20 +4,16 @@ import multer from "multer";
 import {
   getAllAnswerSheets,
   uploadStudentAnswerSheet,
-} from "../controllers/student.controller";
+} from "../controllers/answerSheet.controller";
 import { getAllAnswerSheetPdf, getAnsweredQuestionData, getAnswerSheetPdf, getExaminerAnswerSheet, saveExaminerMark } from "../controllers/examiner.controller";
-import { createExam, getAllExam } from "../controllers/exam.controller";
 
 const router = Router();
 
-router.get("/answer-sheet/:answerSheetId", getExaminerAnswerSheet);
-router.get("/answer-sheet/:answerSheetId/pdf", getAnswerSheetPdf);
-router.post("/create-exam", createExam);
-router.get("/exam", getAllExam);
-router.get("/answerSheet", getAllAnswerSheets);
-router.get("/answerSheetPdf", getAllAnswerSheetPdf);
-// router.get("/mapped-pdf", getAllReadyStatusAnswerSheetPdfIds);
+router.get("/all", getAllAnswerSheets);
+router.get("/allPdf", getAllAnswerSheetPdf);
 
+
+// router.get("/mapped-pdf", getAllReadyStatusAnswerSheetPdfIds);
 router.post(
   "/mark",
   saveExaminerMark
@@ -40,5 +36,10 @@ router.post(
   upload.single("file"),
   uploadStudentAnswerSheet
 );
+
+
+
+router.get("/:answerSheetId", getExaminerAnswerSheet);
+router.get("/:answerSheetId/pdf", getAnswerSheetPdf);
 
 export default router;

@@ -38,7 +38,7 @@ const Login = () => {
         router.replace("/examiner");
       }
       else if (role === "STUDENT") {
-        router.replace("/commonDashboard");
+        router.replace("/common-dashboard");
       }
       else {
         setError("Unauthorized user role");

@@ -9,30 +9,33 @@ export interface Question {
 
 export interface ExamForm {
   name: string;
-  subject: string;
-  answerSheet: {
-    width: number;
-    height: number;
-  };
-  questions: Question[];
-}
+  board: string;
+  className: string;
+  stream?: string;
+  subjects: string[];
 
-export interface Exam {
-  _id: string;
-  name: string;
-  subject: string;
   answerSheet: {
     width: number;
     height: number;
   };
-  questions: {
-    qNo: number;
-    subPart: string;
-    title: string;
-    maxMarks: number;
+}
+interface Exam {
+  name: string;
+  board: string;
+  className: string;
+  stream?: string;
+  subjects: string[];
+
+  answerSheet: {
+    width: number;
+    height: number;
+  };
+
+  subjectQuestions: {
+    subject: string;
+    questions: Question[];
   }[];
 }
-
 export interface Region {
   qNo: string;
   subPart?: string;

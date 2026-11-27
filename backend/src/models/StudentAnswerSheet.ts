@@ -1,3 +1,4 @@
+
 import mongoose, {
     Document,
     Schema,
@@ -10,10 +11,14 @@ export type ProcessingStatus =
     | "ready_with_warning"
     | "failed";
 
-export interface IStudentAnswerSheet
-    extends Document {
-    studentId: mongoose.Types.ObjectId;
+export interface IStudentAnswerSheet extends Document {
+
     examId: mongoose.Types.ObjectId;
+
+    board: string;
+    className: string;
+    stream?: string;
+    subject: string;
 
     pdfId: string;
     originalFileName: string;
@@ -35,13 +40,7 @@ export interface IStudentAnswerSheet
 const studentAnswerSheetSchema =
     new Schema<IStudentAnswerSheet>(
         {
-            studentId: {
-                type: Schema.Types.ObjectId,
-                ref: "Student",
-                required: true,
-                index: true,
-            },
-
+            // Exam Reference
             examId: {
                 type: Schema.Types.ObjectId,
                 ref: "Exam",
@@ -49,6 +48,35 @@ const studentAnswerSheetSchema =
                 index: true,
             },
 
+            // Board
+            board: {
+                type: String,
+                required: true,
+                enum: ["UP", "PSEB", "RBSE"],
+                index: true,
+            },
+
+            // Class
+            className: {
+                type: String,
+                required: true,
+                index: true,
+            },
+
+            // Stream (Class 11 & 12)
+            stream: {
+                type: String,
+                default: null,
+            },
+
+            // Subject
+            subject: {
+                type: String,
+                required: true,
+                index: true,
+            },
+
+            // PDF ID
             pdfId: {
                 type: String,
                 required: true,
@@ -70,6 +98,7 @@ const studentAnswerSheetSchema =
                 type: Number,
             },
 
+            // Processing Status
             processingStatus: {
                 type: String,
                 enum: [
@@ -92,6 +121,7 @@ const studentAnswerSheetSchema =
                 type: String,
             },
 
+            // Coordinate Map
             coordinateMapId: {
                 type: Schema.Types.ObjectId,
                 ref: "CoordinateMap",
@@ -101,6 +131,19 @@ const studentAnswerSheetSchema =
             timestamps: true,
         }
     );
+
+// Useful compound indexes
+studentAnswerSheetSchema.index({
+    examId: 1,
+    board: 1,
+    className: 1,
+    subject: 1,
+});
+
+studentAnswerSheetSchema.index({
+    examId: 1,
+    processingStatus: 1,
+});
 
 export const StudentAnswerSheet =
     mongoose.model<IStudentAnswerSheet>(
